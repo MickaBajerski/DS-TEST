@@ -1,4 +1,7 @@
 // main_unico.c
+/* TODO: ajustar edge-case de dropdowns encostados nas bordas quando janela muito estreita.
+   Prioridade baixa; manter comportamento atual até revisão visual. */
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <stdlib.h>
@@ -7,6 +10,18 @@
 #define DEFAULT_WIDTH 800
 #define DEFAULT_HEIGHT 600
 #define MENU_HEIGHT 28
+
+// Constantes centralizadas
+static const int RIGHT_RESERVED = 120;
+static const int MENU_PADDING = 40;
+static const int MENU_MIN_WIDTH = 40;
+static const int DROPDOWN_MIN_WIDTH = 160;
+static const int EDGE_MARGIN = 8;
+static const int DROPDOWN_ITEM_HEIGHT = 24;
+static const int VOLUME_SUB_WIDTH = 120;
+static const int CLOSE_BTN_SIZE = 24
+
+; // small formatting helper
 
 int menuSelecionado = -1; // -1 = nenhum menu aberto
 
@@ -54,20 +69,56 @@ typedef struct {
 
 Modal modal = {0};
 
+// variáveis de janela/recursos
 int win_w = DEFAULT_WIDTH;
 int win_h = DEFAULT_HEIGHT;
 SDL_Texture* texture = NULL;
 Uint32* pixels = NULL;
 
-int recreateTextureAndBuffer(SDL_Renderer* renderer, int new_w, int new_h) {
-    if (new_w <= 0 || new_h <= 0) return 0;
+// HiDPI / drawable size
+int drawable_w = DEFAULT_WIDTH;
+int drawable_h = DEFAULT_HEIGHT;
+
+// utilitários
+static int clamp_int(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+static int calc_draw_x(int desired_x, int width) {
+    int right_limit = win_w - EDGE_MARGIN;
+    if (desired_x + width > right_limit) desired_x = right_limit - width;
+    return clamp_int(desired_x, EDGE_MARGIN, right_limit - width);
+}
+
+// recria texture e buffer usando tamanho drawable (HiDPI aware)
+int recreateTextureAndBufferFromWindow(SDL_Window* window, SDL_Renderer* renderer) {
+    if (!window || !renderer) return 0;
+
+    // obter tamanho da janela (UI coords) e tamanho do drawable (pixels)
+    SDL_GetWindowSize(window, &win_w, &win_h);
+    if (SDL_GetRendererOutputSize(renderer, &drawable_w, &drawable_h) != 0) {
+        // fallback: use window size
+        drawable_w = win_w;
+        drawable_h = win_h;
+    }
+
+    if (drawable_w <= 0 || drawable_h <= 0) return 0;
+
     if (texture) { SDL_DestroyTexture(texture); texture = NULL; }
     if (pixels) { free(pixels); pixels = NULL; }
-    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, new_w, new_h);
-    if (!texture) return 0;
-    pixels = malloc(sizeof(Uint32) * new_w * new_h);
-    if (!pixels) { SDL_DestroyTexture(texture); texture = NULL; return 0; }
-    win_w = new_w; win_h = new_h;
+
+    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, drawable_w, drawable_h);
+    if (!texture) {
+        SDL_Log("CreateTexture failed: %s", SDL_GetError());
+        return 0;
+    }
+
+    pixels = malloc(sizeof(Uint32) * drawable_w * drawable_h);
+    if (!pixels) {
+        SDL_Log("malloc failed for pixels");
+        SDL_DestroyTexture(texture);
+        texture = NULL;
+        return 0;
+    }
+
     return 1;
 }
 
@@ -76,7 +127,7 @@ int recreateTextureAndBuffer(SDL_Renderer* renderer, int new_w, int new_h) {
 void computeMenuBoxes(TTF_Font* font, int is_fullscreen) {
     int margin_left = 10;
     int margin_right = 12;
-    int right_reserved = 120; // espaço reservado para indicador de volume
+    int right_reserved = RIGHT_RESERVED;
     int available_width = win_w - right_reserved - margin_left - margin_right;
     if (available_width < 200) available_width = win_w - margin_left - margin_right;
 
@@ -84,11 +135,13 @@ void computeMenuBoxes(TTF_Font* font, int is_fullscreen) {
         int x = margin_left;
         for (int i = 0; i < numMenus; ++i) {
             int w = 0, h = 0;
-            TTF_SizeUTF8(font, menus[i], &w, &h);
-            int boxw = w + 40;
+            if (TTF_SizeUTF8(font, menus[i], &w, &h) != 0) {
+                w = 50; // fallback
+            }
+            int boxw = w + MENU_PADDING;
             if (x + boxw > available_width) {
                 boxw = available_width - x;
-                if (boxw < 40) boxw = 40;
+                if (boxw < MENU_MIN_WIDTH) boxw = MENU_MIN_WIDTH;
             }
             menuBoxes[i].x = x;
             menuBoxes[i].y = 0;
@@ -103,7 +156,7 @@ void computeMenuBoxes(TTF_Font* font, int is_fullscreen) {
     int textWidths[numMenus];
     int textH;
     for (int i = 0; i < numMenus; ++i) {
-        TTF_SizeUTF8(font, menus[i], &textWidths[i], &textH);
+        if (TTF_SizeUTF8(font, menus[i], &textWidths[i], &textH) != 0) textWidths[i] = 50;
         totalTextW += textWidths[i];
     }
 
@@ -119,7 +172,7 @@ void computeMenuBoxes(TTF_Font* font, int is_fullscreen) {
         int boxw = textWidths[i] + 16;
         if (x + boxw > available_width) {
             boxw = available_width - x;
-            if (boxw < 40) boxw = 40;
+            if (boxw < MENU_MIN_WIDTH) boxw = MENU_MIN_WIDTH;
         }
         menuBoxes[i].x = x;
         menuBoxes[i].y = 0;
@@ -151,7 +204,16 @@ void drawMenuBar(SDL_Renderer* renderer, TTF_Font* font) {
         }
 
         SDL_Surface* surface = TTF_RenderUTF8_Solid(font, menus[i], black);
+        if (!surface) {
+            SDL_Log("TTF_RenderUTF8_Solid failed: %s", TTF_GetError());
+            continue;
+        }
         SDL_Texture* textureText = SDL_CreateTextureFromSurface(renderer, surface);
+        if (!textureText) {
+            SDL_Log("CreateTextureFromSurface failed: %s", SDL_GetError());
+            SDL_FreeSurface(surface);
+            continue;
+        }
         int textY = y + (h - surface->h) / 2;
         SDL_Rect dst = {x + 8, textY, surface->w, surface->h};
         SDL_RenderCopy(renderer, textureText, NULL, &dst);
@@ -165,15 +227,10 @@ void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], i
     if (!items || numItems <= 0) return;
     SDL_Color black = {0,0,0,255};
     SDL_Color white = {255,255,255,255};
-    int itemHeight = 24;
+    int itemHeight = DROPDOWN_ITEM_HEIGHT;
 
-    int right_margin = 8;
-    if (x + width > win_w - right_margin) {
-        int newx = win_w - right_margin - width;
-        if (newx < 8) newx = 8;
-        x = newx;
-    }
-    if (x < 8) x = 8;
+    // adjust x to keep dropdown inside window
+    x = calc_draw_x(x, width);
 
     int mx, my;
     SDL_GetMouseState(&mx, &my);
@@ -187,7 +244,16 @@ void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], i
 
         SDL_Color textColor = isHover ? white : black;
         SDL_Surface* surface = TTF_RenderUTF8_Solid(font, items[i], textColor);
+        if (!surface) {
+            SDL_Log("TTF_RenderUTF8_Solid failed for dropdown item: %s", TTF_GetError());
+            continue;
+        }
         SDL_Texture* textureText = SDL_CreateTextureFromSurface(renderer, surface);
+        if (!textureText) {
+            SDL_Log("CreateTextureFromSurface failed: %s", SDL_GetError());
+            SDL_FreeSurface(surface);
+            continue;
+        }
         SDL_Rect dst = {x + 8, y + 4 + i * itemHeight, surface->w, surface->h};
         SDL_RenderCopy(renderer, textureText, NULL, &dst);
         SDL_FreeSurface(surface);
@@ -210,12 +276,20 @@ void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
 
     SDL_Color black = {0,0,0,255};
     SDL_Surface* sTitle = TTF_RenderUTF8_Solid(font, m->title, black);
-    SDL_Texture* tTitle = SDL_CreateTextureFromSurface(renderer, sTitle);
-    int titleY = m->rect.y + 8;
-    SDL_Rect dstTitle = {m->rect.x + 12, titleY, sTitle->w, sTitle->h};
-    SDL_RenderCopy(renderer, tTitle, NULL, &dstTitle);
-    SDL_FreeSurface(sTitle);
-    SDL_DestroyTexture(tTitle);
+    if (sTitle) {
+        SDL_Texture* tTitle = SDL_CreateTextureFromSurface(renderer, sTitle);
+        if (tTitle) {
+            int titleY = m->rect.y + 8;
+            SDL_Rect dstTitle = {m->rect.x + 12, titleY, sTitle->w, sTitle->h};
+            SDL_RenderCopy(renderer, tTitle, NULL, &dstTitle);
+            SDL_DestroyTexture(tTitle);
+        } else {
+            SDL_Log("CreateTextureFromSurface failed for modal title: %s", SDL_GetError());
+        }
+        SDL_FreeSurface(sTitle);
+    } else {
+        SDL_Log("TTF_RenderUTF8_Solid failed for modal title: %s", TTF_GetError());
+    }
 
     SDL_SetRenderDrawColor(renderer, 200,80,80,255);
     SDL_RenderFillRect(renderer, &m->closeBtn);
@@ -229,11 +303,15 @@ void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
 
     const char* placeholder = "Conteúdo da janela (substituir depois)";
     SDL_Surface* sCont = TTF_RenderUTF8_Solid(font, placeholder, black);
-    SDL_Texture* tCont = SDL_CreateTextureFromSurface(renderer, sCont);
-    SDL_Rect dstCont = {m->rect.x + 12, m->rect.y + 40, sCont->w, sCont->h};
-    SDL_RenderCopy(renderer, tCont, NULL, &dstCont);
-    SDL_FreeSurface(sCont);
-    SDL_DestroyTexture(tCont);
+    if (sCont) {
+        SDL_Texture* tCont = SDL_CreateTextureFromSurface(renderer, sCont);
+        if (tCont) {
+            SDL_Rect dstCont = {m->rect.x + 12, m->rect.y + 40, sCont->w, sCont->h};
+            SDL_RenderCopy(renderer, tCont, NULL, &dstCont);
+            SDL_DestroyTexture(tCont);
+        }
+        SDL_FreeSurface(sCont);
+    }
 }
 
 void openModalWithTitle(Modal* m, const char* title) {
@@ -247,7 +325,7 @@ void openModalWithTitle(Modal* m, const char* title) {
     m->rect.x = (win_w - w) / 2;
     m->rect.y = (win_h - h) / 2;
     m->rect.w = w; m->rect.h = h;
-    m->closeBtn.w = 24; m->closeBtn.h = 24;
+    m->closeBtn.w = CLOSE_BTN_SIZE; m->closeBtn.h = CLOSE_BTN_SIZE;
     m->closeBtn.x = m->rect.x + m->rect.w - m->closeBtn.w - 8;
     m->closeBtn.y = m->rect.y + 8;
 }
@@ -267,6 +345,29 @@ void toggleFullscreen(SDL_Window* window) {
     }
 }
 
+void drawVolumeIndicator(SDL_Renderer* renderer, TTF_Font* font) {
+    char buf[64];
+    if (muted) snprintf(buf, sizeof(buf), "Muted");
+    else snprintf(buf, sizeof(buf), "Vol: %d%%", currentVolume);
+    SDL_Color black = {0,0,0,255};
+    SDL_Surface* s = TTF_RenderUTF8_Solid(font, buf, black);
+    if (!s) {
+        SDL_Log("TTF_RenderUTF8_Solid failed for volume indicator: %s", TTF_GetError());
+        return;
+    }
+    SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+    if (!t) {
+        SDL_Log("CreateTextureFromSurface failed for volume indicator: %s", SDL_GetError());
+        SDL_FreeSurface(s);
+        return;
+    }
+    int right_margin = 12;
+    SDL_Rect dst = {win_w - s->w - right_margin, 6, s->w, s->h};
+    SDL_RenderCopy(renderer, t, NULL, &dst);
+    SDL_FreeSurface(s);
+    SDL_DestroyTexture(t);
+}
+
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { SDL_Log("SDL_Init error: %s", SDL_GetError()); return 1; }
@@ -280,12 +381,12 @@ int main(int argc, char* argv[]) {
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer) { SDL_Log("CreateRenderer error: %s", SDL_GetError()); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; }
 
-    if (!recreateTextureAndBuffer(renderer, DEFAULT_WIDTH, DEFAULT_HEIGHT)) {
+    if (!recreateTextureAndBufferFromWindow(window, renderer)) {
         SDL_Log("Falha ao criar texture/buffer"); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1;
     }
 
     TTF_Font* font = TTF_OpenFont("fonts/arial.ttf", 18);
-    if (!font) { SDL_Log("Erro ao carregar fonte!"); free(pixels); SDL_DestroyTexture(texture); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; }
+    if (!font) { SDL_Log("Erro ao carregar fonte: %s", TTF_GetError()); free(pixels); SDL_DestroyTexture(texture); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; }
 
     int running = 1;
     SDL_Event event;
@@ -329,17 +430,16 @@ int main(int argc, char* argv[]) {
                 if (volumeDropdownOpen) {
                     int dx = menuBoxes[3].x;
                     int dy = MENU_HEIGHT;
-                    int width = menuBoxes[3].w; if (width < 160) width = 160;
+                    int width = menuBoxes[3].w; if (width < DROPDOWN_MIN_WIDTH) width = DROPDOWN_MIN_WIDTH;
                     int vdx = dx + width;
                     int vdy = dy;
-                    int itemH = 24;
-                    int vwidth = 120;
-                    if (vdx + vwidth > win_w - 8) vdx = dx - vwidth;
-                    if (vdx < 8) vdx = 8;
-                    SDL_Rect vRect = {vdx, vdy, vwidth, itemH * volumeCount};
+                    int vwidth = VOLUME_SUB_WIDTH;
+                    if (vdx + vwidth > win_w - EDGE_MARGIN) vdx = dx - vwidth;
+                    if (vdx < EDGE_MARGIN) vdx = EDGE_MARGIN;
+                    SDL_Rect vRect = {vdx, vdy, vwidth, DROPDOWN_ITEM_HEIGHT * volumeCount};
 
                     if (mx >= vRect.x && mx <= vRect.x + vRect.w && my >= vRect.y && my <= vRect.y + vRect.h) {
-                        int idx = (my - vRect.y) / itemH;
+                        int idx = (my - vRect.y) / DROPDOWN_ITEM_HEIGHT;
                         if (idx >= 0 && idx < volumeCount) { currentVolume = idx * 10; muted = 0; SDL_Log("Volume set to %d%%", currentVolume); volumeDropdownOpen = 0; }
                         continue;
                     } else { volumeDropdownOpen = 0; }
@@ -359,17 +459,11 @@ int main(int argc, char* argv[]) {
                     if (menuSelecionado != -1) {
                         int dx = menuBoxes[menuSelecionado].x;
                         int dy = MENU_HEIGHT;
-                        int itemH = 24;
+                        int itemH = DROPDOWN_ITEM_HEIGHT;
                         int count = dropdownCounts[menuSelecionado];
-                        int width = menuBoxes[menuSelecionado].w; if (width < 160) width = 160;
+                        int width = menuBoxes[menuSelecionado].w; if (width < DROPDOWN_MIN_WIDTH) width = DROPDOWN_MIN_WIDTH;
 
-                        int draw_dx = dx;
-                        if (draw_dx + width > win_w - 8) {
-                            int newdx = win_w - 8 - width;
-                            if (newdx < 8) newdx = 8;
-                            draw_dx = newdx;
-                        }
-                        if (draw_dx < 8) draw_dx = 8;
+                        int draw_dx = calc_draw_x(dx, width);
 
                         SDL_Rect dropRect = {draw_dx, dy, width, itemH * count};
 
@@ -385,7 +479,6 @@ int main(int argc, char* argv[]) {
                                 } else if (menuSelecionado == 1) {
                                     if (strcmp(escolha, "Fullscreen") == 0) {
                                         toggleFullscreen(window);
-                                        // after toggling fullscreen, we'll check fullscreen change below and set need_recreate if size changed
                                     } else openModalWithTitle(&modal, escolha);
                                 } else if (menuSelecionado == 2) {
                                     if (strcmp(escolha, "Reiniciar") == 0) SDL_Log("Ação: Reiniciar sistema (placeholder)");
@@ -425,15 +518,15 @@ int main(int argc, char* argv[]) {
 
         // perform recreate once per loop if needed
         if (need_recreate) {
-            if (!recreateTextureAndBuffer(renderer, last_w, last_h)) {
+            if (!recreateTextureAndBufferFromWindow(window, renderer)) {
                 SDL_Log("Falha ao recriar texture/buffer");
             }
             need_recreate = 0;
         }
 
-        // gerar sweep RGB
-        for (int y = 0; y < win_h; y++) {
-            for (int x = 0; x < win_w; x++) {
+        // gerar sweep RGB (preenche drawable buffer)
+        for (int y = 0; y < drawable_h; y++) {
+            for (int x = 0; x < drawable_w; x++) {
                 int raw = (x + y - frame) % 128; if (raw < 0) raw += 128;
                 int tri = abs(raw - 64); Uint8 v = tri / 4;
                 Uint8 r = v, g = v, b = v;
@@ -443,11 +536,12 @@ int main(int argc, char* argv[]) {
                     else if (colorPhase == 1) b += v * 6;
                     else if (colorPhase == 2) r += v * 6;
                 }
-                pixels[y * win_w + x] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+                pixels[y * drawable_w + x] = (0xFF << 24) | (r << 16) | (g << 8) | b;
             }
         }
 
-        SDL_UpdateTexture(texture, NULL, pixels, win_w * sizeof(Uint32));
+        // atualizar texture com drawable buffer
+        SDL_UpdateTexture(texture, NULL, pixels, drawable_w * sizeof(Uint32));
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, NULL, NULL);
 
@@ -457,43 +551,24 @@ int main(int argc, char* argv[]) {
             int dx = menuBoxes[menuSelecionado].x;
             int dy = MENU_HEIGHT;
             int count = dropdownCounts[menuSelecionado];
-            int width = menuBoxes[menuSelecionado].w; if (width < 160) width = 160;
+            int width = menuBoxes[menuSelecionado].w; if (width < DROPDOWN_MIN_WIDTH) width = DROPDOWN_MIN_WIDTH;
 
-            int draw_dx = dx;
-            if (draw_dx + width > win_w - 8) {
-                int newdx = win_w - 8 - width;
-                if (newdx < 8) newdx = 8;
-                draw_dx = newdx;
-            }
-            if (draw_dx < 8) draw_dx = 8;
-
+            int draw_dx = calc_draw_x(dx, width);
             drawDropdown(renderer, font, allDropdowns[menuSelecionado], count, draw_dx, dy, width);
 
             if (menuSelecionado == 3 && volumeDropdownOpen) {
                 int vdx = draw_dx + width;
                 int vdy = dy;
-                int vwidth = 120;
-                if (vdx + vwidth > win_w - 8) vdx = draw_dx - vwidth;
-                if (vdx < 8) vdx = 8;
+                int vwidth = VOLUME_SUB_WIDTH;
+                if (vdx + vwidth > win_w - EDGE_MARGIN) vdx = draw_dx - vwidth;
+                if (vdx < EDGE_MARGIN) vdx = EDGE_MARGIN;
                 drawDropdown(renderer, font, volumeItems, volumeCount, vdx, vdy, vwidth);
             }
         }
 
         drawModal(renderer, font, &modal);
 
-        {
-            char buf[64];
-            if (muted) snprintf(buf, sizeof(buf), "Muted");
-            else snprintf(buf, sizeof(buf), "Vol: %d%%", currentVolume);
-            SDL_Color black = {0,0,0,255};
-            SDL_Surface* s = TTF_RenderUTF8_Solid(font, buf, black);
-            SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
-            int right_margin = 12;
-            SDL_Rect dst = {win_w - s->w - right_margin, 6, s->w, s->h};
-            SDL_RenderCopy(renderer, t, NULL, &dst);
-            SDL_FreeSurface(s);
-            SDL_DestroyTexture(t);
-        }
+        drawVolumeIndicator(renderer, font);
 
         SDL_RenderPresent(renderer);
         frame++;
@@ -509,6 +584,3 @@ int main(int argc, char* argv[]) {
     SDL_Quit();
     return 0;
 }
- 
- / *   T O D O :   a j u s t a r   p o s i c i o n a m e n t o   d e   d r o p d o w n s   q u a n d o   m e n u s   f i c a m   e n c o s t a d o s   n a s   b o r d a s   ( e d g e - c a s e ) .   * /  
- 
