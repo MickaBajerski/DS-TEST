@@ -4,27 +4,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define WIDTH 800
-#define HEIGHT 600
+#define DEFAULT_WIDTH 800
+#define DEFAULT_HEIGHT 600
 #define MENU_HEIGHT 28
 
 int menuSelecionado = -1; // -1 = nenhum menu aberto
 
-// caixas dos menus (preenchidas por computeMenuBoxes)
 SDL_Rect menuBoxes[6];
 
-// textos dos menus
 const char* menus[] = {"Cartucho", "Tela", "Sistema", "Áudio", "Configuração", "Ajuda"};
 const int numMenus = 6;
 
-// dropdown items para cada menu
-// Todos os itens restaurados; alguns têm comportamento especial (não abrem modal).
-const char* dropdownItems0[] = {"Inserir Cartucho", "Ejetar", "Info", "Sair"}; // Cartucho
-const char* dropdownItems1[] = {"Resolução", "Fullscreen", "Escala"};           // Tela (Fullscreen restaurado)
-const char* dropdownItems2[] = {"Reiniciar", "Salvar Estado", "Carregar Estado"}; // Sistema (restaurado)
-const char* dropdownItems3[] = {"Volume", "Mute", "Mixer"};                     // Áudio
-const char* dropdownItems4[] = {"Vídeo", "Áudio", "Controles", "Sistema"};      // Configuração
-const char* dropdownItems5[] = {"Documentação", "Sobre"};                       // Ajuda
+const char* dropdownItems0[] = {"Inserir Cartucho", "Ejetar", "Info", "Sair"};
+const char* dropdownItems1[] = {"Resolução", "Fullscreen", "Escala"};
+const char* dropdownItems2[] = {"Reiniciar", "Salvar Estado", "Carregar Estado"};
+const char* dropdownItems3[] = {"Volume", "Mute", "Mixer"};
+const char* dropdownItems4[] = {"Vídeo", "Áudio", "Controles", "Sistema"};
+const char* dropdownItems5[] = {"Documentação", "Sobre"};
 
 const char** allDropdowns[] = {
         dropdownItems0, dropdownItems1, dropdownItems2,
@@ -40,49 +36,105 @@ const int dropdownCounts[] = {
         sizeof(dropdownItems5)/sizeof(dropdownItems5[0])
 };
 
-// volume sub-dropdown (0%..100% step 10)
 const char* volumeItems[] = {
         "0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"
 };
 const int volumeCount = sizeof(volumeItems)/sizeof(volumeItems[0]);
 
-// estado do volume sub-dropdown
 int volumeDropdownOpen = 0;
-int currentVolume = 100; // inicia em 100%
+int currentVolume = 100;
 int muted = 0;
 
-
-// Modal genérico (apenas 1 modal aberto por vez)
 typedef struct {
     int open;
     char title[128];
-    SDL_Rect rect;      // posição e tamanho da janela
-    SDL_Rect closeBtn;  // área do botão X
+    SDL_Rect rect;
+    SDL_Rect closeBtn;
 } Modal;
 
 Modal modal = {0};
 
-// calcula as caixas dos menus (usa a fonte para medir largura)
-void computeMenuBoxes(TTF_Font* font) {
-    int x = 10;
+int win_w = DEFAULT_WIDTH;
+int win_h = DEFAULT_HEIGHT;
+SDL_Texture* texture = NULL;
+Uint32* pixels = NULL;
+
+int recreateTextureAndBuffer(SDL_Renderer* renderer, int new_w, int new_h) {
+    if (new_w <= 0 || new_h <= 0) return 0;
+    if (texture) { SDL_DestroyTexture(texture); texture = NULL; }
+    if (pixels) { free(pixels); pixels = NULL; }
+    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, new_w, new_h);
+    if (!texture) return 0;
+    pixels = malloc(sizeof(Uint32) * new_w * new_h);
+    if (!pixels) { SDL_DestroyTexture(texture); texture = NULL; return 0; }
+    win_w = new_w; win_h = new_h;
+    return 1;
+}
+
+// computeMenuBoxes: windowed uses fixed spacing; fullscreen uses responsive.
+// Both modes reserve space at right for volume indicator and clamp menus to available area.
+void computeMenuBoxes(TTF_Font* font, int is_fullscreen) {
+    int margin_left = 10;
+    int margin_right = 12;
+    int right_reserved = 120; // espaço reservado para indicador de volume
+    int available_width = win_w - right_reserved - margin_left - margin_right;
+    if (available_width < 200) available_width = win_w - margin_left - margin_right;
+
+    if (!is_fullscreen) {
+        int x = margin_left;
+        for (int i = 0; i < numMenus; ++i) {
+            int w = 0, h = 0;
+            TTF_SizeUTF8(font, menus[i], &w, &h);
+            int boxw = w + 40;
+            if (x + boxw > available_width) {
+                boxw = available_width - x;
+                if (boxw < 40) boxw = 40;
+            }
+            menuBoxes[i].x = x;
+            menuBoxes[i].y = 0;
+            menuBoxes[i].w = boxw;
+            menuBoxes[i].h = MENU_HEIGHT;
+            x += menuBoxes[i].w;
+        }
+        return;
+    }
+
+    int totalTextW = 0;
+    int textWidths[numMenus];
+    int textH;
     for (int i = 0; i < numMenus; ++i) {
-        int w = 0, h = 0;
-        TTF_SizeUTF8(font, menus[i], &w, &h);
+        TTF_SizeUTF8(font, menus[i], &textWidths[i], &textH);
+        totalTextW += textWidths[i];
+    }
+
+    int spacing = 40;
+    if (numMenus > 1) {
+        spacing = (available_width - totalTextW) / (numMenus - 1);
+        if (spacing > 60) spacing = 60;
+        if (spacing < 8) spacing = 8;
+    }
+
+    int x = margin_left;
+    for (int i = 0; i < numMenus; ++i) {
+        int boxw = textWidths[i] + 16;
+        if (x + boxw > available_width) {
+            boxw = available_width - x;
+            if (boxw < 40) boxw = 40;
+        }
         menuBoxes[i].x = x;
         menuBoxes[i].y = 0;
-        menuBoxes[i].w = w + 40; // padding horizontal
+        menuBoxes[i].w = boxw;
         menuBoxes[i].h = MENU_HEIGHT;
-        x += menuBoxes[i].w;
+        x += menuBoxes[i].w + spacing;
     }
 }
 
-// desenha a barra superior e os textos; também faz hover highlight
 void drawMenuBar(SDL_Renderer* renderer, TTF_Font* font) {
-    SDL_Rect menuBar = {0, 0, WIDTH, MENU_HEIGHT};
+    SDL_Rect menuBar = {0, 0, win_w, MENU_HEIGHT};
     SDL_SetRenderDrawColor(renderer, 100, 100, 100, 255);
     SDL_RenderFillRect(renderer, &menuBar);
 
-    SDL_Color black = {0, 0, 0, 255};
+    SDL_Color black = {0,0,0,255};
     int mx, my;
     SDL_GetMouseState(&mx, &my);
 
@@ -92,81 +144,70 @@ void drawMenuBar(SDL_Renderer* renderer, TTF_Font* font) {
         int w = menuBoxes[i].w;
         int h = menuBoxes[i].h;
 
-        // hover highlight (quando mouse sobre a caixa)
         if (mx >= x && mx <= x + w && my >= y && my <= y + h) {
             SDL_SetRenderDrawColor(renderer, 180, 180, 180, 255);
             SDL_Rect r = {x, y, w, h};
             SDL_RenderFillRect(renderer, &r);
         }
 
-        // renderiza texto centralizado verticalmente
         SDL_Surface* surface = TTF_RenderUTF8_Solid(font, menus[i], black);
-        SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+        SDL_Texture* textureText = SDL_CreateTextureFromSurface(renderer, surface);
         int textY = y + (h - surface->h) / 2;
         SDL_Rect dst = {x + 8, textY, surface->w, surface->h};
-        SDL_RenderCopy(renderer, texture, NULL, &dst);
-
+        SDL_RenderCopy(renderer, textureText, NULL, &dst);
         SDL_FreeSurface(surface);
-        SDL_DestroyTexture(texture);
+        SDL_DestroyTexture(textureText);
     }
 }
 
-// desenha um dropdown com largura e altura baseados em parâmetros
+// drawDropdown: adjusts x so dropdown never draws off-screen; clamps left/right.
 void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], int numItems, int x, int y, int width) {
     if (!items || numItems <= 0) return;
-    SDL_Color black = {0, 0, 0, 255};
-    SDL_Color white = {255, 255, 255, 255};
+    SDL_Color black = {0,0,0,255};
+    SDL_Color white = {255,255,255,255};
     int itemHeight = 24;
+
+    int right_margin = 8;
+    if (x + width > win_w - right_margin) {
+        int newx = win_w - right_margin - width;
+        if (newx < 8) newx = 8;
+        x = newx;
+    }
+    if (x < 8) x = 8;
 
     int mx, my;
     SDL_GetMouseState(&mx, &my);
 
     for (int i = 0; i < numItems; ++i) {
         SDL_Rect rect = {x, y + i * itemHeight, width, itemHeight};
-
-        // hover highlight para cada item
         int isHover = (mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h);
-
-        if (isHover) {
-            SDL_SetRenderDrawColor(renderer, 120, 120, 120, 255); // destaque do item
-        } else {
-            SDL_SetRenderDrawColor(renderer, 80, 80, 80, 255); // fundo normal
-        }
+        if (isHover) SDL_SetRenderDrawColor(renderer, 120,120,120,255);
+        else SDL_SetRenderDrawColor(renderer, 80,80,80,255);
         SDL_RenderFillRect(renderer, &rect);
 
-        // renderiza texto; cor diferente quando hover
         SDL_Color textColor = isHover ? white : black;
         SDL_Surface* surface = TTF_RenderUTF8_Solid(font, items[i], textColor);
-        SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-
+        SDL_Texture* textureText = SDL_CreateTextureFromSurface(renderer, surface);
         SDL_Rect dst = {x + 8, y + 4 + i * itemHeight, surface->w, surface->h};
-        SDL_RenderCopy(renderer, texture, NULL, &dst);
-
+        SDL_RenderCopy(renderer, textureText, NULL, &dst);
         SDL_FreeSurface(surface);
-        SDL_DestroyTexture(texture);
+        SDL_DestroyTexture(textureText);
     }
 }
 
-// desenha modal genérico com título e botão X
 void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
     if (!m->open) return;
-
-    // fundo semi-transparente (overlay)
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 120);
-    SDL_Rect overlay = {0, 0, WIDTH, HEIGHT};
+    SDL_SetRenderDrawColor(renderer, 0,0,0,120);
+    SDL_Rect overlay = {0,0,win_w,win_h};
     SDL_RenderFillRect(renderer, &overlay);
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 
-    // janela
-    SDL_SetRenderDrawColor(renderer, 220, 220, 220, 255);
+    SDL_SetRenderDrawColor(renderer, 220,220,220,255);
     SDL_RenderFillRect(renderer, &m->rect);
-
-    // borda
-    SDL_SetRenderDrawColor(renderer, 80, 80, 80, 255);
+    SDL_SetRenderDrawColor(renderer, 80,80,80,255);
     SDL_RenderDrawRect(renderer, &m->rect);
 
-    // título
     SDL_Color black = {0,0,0,255};
     SDL_Surface* sTitle = TTF_RenderUTF8_Solid(font, m->title, black);
     SDL_Texture* tTitle = SDL_CreateTextureFromSurface(renderer, sTitle);
@@ -176,20 +217,16 @@ void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
     SDL_FreeSurface(sTitle);
     SDL_DestroyTexture(tTitle);
 
-    // botão X (close)
-    SDL_SetRenderDrawColor(renderer, 200, 80, 80, 255);
+    SDL_SetRenderDrawColor(renderer, 200,80,80,255);
     SDL_RenderFillRect(renderer, &m->closeBtn);
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-    // desenha um X simples
+    SDL_SetRenderDrawColor(renderer, 255,255,255,255);
     int cx = m->closeBtn.x + 4;
     int cy = m->closeBtn.y + 4;
     int cw = m->closeBtn.w - 8;
     int ch = m->closeBtn.h - 8;
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
     SDL_RenderDrawLine(renderer, cx, cy, cx + cw, cy + ch);
     SDL_RenderDrawLine(renderer, cx + cw, cy, cx, cy + ch);
 
-    // conteúdo placeholder (texto)
     const char* placeholder = "Conteúdo da janela (substituir depois)";
     SDL_Surface* sCont = TTF_RenderUTF8_Solid(font, placeholder, black);
     SDL_Texture* tCont = SDL_CreateTextureFromSurface(renderer, sCont);
@@ -199,32 +236,26 @@ void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
     SDL_DestroyTexture(tCont);
 }
 
-// abre modal com título e tamanho padrão (centralizado)
 void openModalWithTitle(Modal* m, const char* title) {
     m->open = 1;
     strncpy(m->title, title, sizeof(m->title)-1);
     m->title[sizeof(m->title)-1] = '\0';
-
-    int w = 480;
-    int h = 220;
-    m->rect.x = (WIDTH - w) / 2;
-    m->rect.y = (HEIGHT - h) / 2;
-    m->rect.w = w;
-    m->rect.h = h;
-
-    // close button (24x24) no canto superior direito da janela
-    m->closeBtn.w = 24;
-    m->closeBtn.h = 24;
+    int w = win_w * 60 / 100;
+    int h = win_h * 35 / 100;
+    if (w < 320) w = 320;
+    if (h < 160) h = 160;
+    m->rect.x = (win_w - w) / 2;
+    m->rect.y = (win_h - h) / 2;
+    m->rect.w = w; m->rect.h = h;
+    m->closeBtn.w = 24; m->closeBtn.h = 24;
     m->closeBtn.x = m->rect.x + m->rect.w - m->closeBtn.w - 8;
     m->closeBtn.y = m->rect.y + 8;
 }
 
-// verifica clique no botão X do modal
 int isPointInRect(int px, int py, SDL_Rect* r) {
     return (px >= r->x && px <= r->x + r->w && py >= r->y && py <= r->y + r->h);
 }
 
-// alterna fullscreen da janela (não abre modal)
 void toggleFullscreen(SDL_Window* window) {
     Uint32 flags = SDL_GetWindowFlags(window);
     if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) {
@@ -238,238 +269,138 @@ void toggleFullscreen(SDL_Window* window) {
 
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) { SDL_Log("SDL_Init error: %s", SDL_GetError()); return 1; }
+    if (TTF_Init() != 0) { SDL_Log("TTF_Init error: %s", TTF_GetError()); SDL_Quit(); return 1; }
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        SDL_Log("SDL_Init error: %s", SDL_GetError());
-        return 1;
-    }
-    if (TTF_Init() != 0) {
-        SDL_Log("TTF_Init error: %s", TTF_GetError());
-        SDL_Quit();
-        return 1;
-    }
-
-    SDL_Window* window = SDL_CreateWindow(
-            "Idle - Gray Sweep RGB + Menu DS",
-            SDL_WINDOWPOS_CENTERED,
-            SDL_WINDOWPOS_CENTERED,
-            WIDTH, HEIGHT,
-            SDL_WINDOW_SHOWN
-    );
-    if (!window) {
-        SDL_Log("CreateWindow error: %s", SDL_GetError());
-        TTF_Quit();
-        SDL_Quit();
-        return 1;
-    }
+    SDL_Window* window = SDL_CreateWindow("Idle - Gray Sweep RGB + Menu DS",
+                                          SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, DEFAULT_WIDTH, DEFAULT_HEIGHT,
+                                          SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+    if (!window) { SDL_Log("CreateWindow error: %s", SDL_GetError()); TTF_Quit(); SDL_Quit(); return 1; }
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    if (!renderer) {
-        SDL_Log("CreateRenderer error: %s", SDL_GetError());
-        SDL_DestroyWindow(window);
-        TTF_Quit();
-        SDL_Quit();
-        return 1;
-    }
+    if (!renderer) { SDL_Log("CreateRenderer error: %s", SDL_GetError()); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; }
 
-    SDL_Texture* texture = SDL_CreateTexture(
-            renderer,
-            SDL_PIXELFORMAT_ARGB8888,
-            SDL_TEXTUREACCESS_STREAMING,
-            WIDTH, HEIGHT
-    );
-    if (!texture) {
-        SDL_Log("CreateTexture error: %s", SDL_GetError());
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        TTF_Quit();
-        SDL_Quit();
-        return 1;
-    }
-
-    Uint32* pixels = malloc(sizeof(Uint32) * WIDTH * HEIGHT);
-    if (!pixels) {
-        SDL_Log("malloc failed");
-        SDL_DestroyTexture(texture);
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        TTF_Quit();
-        SDL_Quit();
-        return 1;
+    if (!recreateTextureAndBuffer(renderer, DEFAULT_WIDTH, DEFAULT_HEIGHT)) {
+        SDL_Log("Falha ao criar texture/buffer"); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1;
     }
 
     TTF_Font* font = TTF_OpenFont("fonts/arial.ttf", 18);
-    if (!font) {
-        SDL_Log("Erro ao carregar fonte!");
-        free(pixels);
-        SDL_DestroyTexture(texture);
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        TTF_Quit();
-        SDL_Quit();
-        return 1;
-    }
+    if (!font) { SDL_Log("Erro ao carregar fonte!"); free(pixels); SDL_DestroyTexture(texture); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; }
 
     int running = 1;
     SDL_Event event;
     int frame = 0;
 
-    // loop principal
+    // track fullscreen and last known size to avoid recreate loop
+    int prev_fullscreen = 0;
+    int last_w = win_w;
+    int last_h = win_h;
+    int need_recreate = 0;
+
     while (running) {
-        // atualiza caixas dos menus (necessário para detectar cliques)
-        computeMenuBoxes(font);
+        Uint32 flags = SDL_GetWindowFlags(window);
+        int is_fullscreen = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 1 : 0;
 
-        // trata eventos
+        // compute menu boxes using fullscreen flag
+        computeMenuBoxes(font, is_fullscreen);
+
+        // process events; mark need_recreate when size changes
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) {
-                running = 0;
-            } else if (event.type == SDL_KEYDOWN) {
-                if (event.key.keysym.sym == SDLK_ESCAPE) {
-                    // ESC fecha modal se aberto, senão fecha app
-                    if (modal.open) modal.open = 0;
-                    else running = 0;
-                }
-            } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
-                int mx = event.button.x;
-                int my = event.button.y;
-
-                // se modal aberto, prioriza interações com ele
-                if (modal.open) {
-                    // clique no X?
-                    if (isPointInRect(mx, my, &modal.closeBtn)) {
-                        modal.open = 0;
-                    } else {
-                        // clique fora da janela fecha modal
-                        if (!isPointInRect(mx, my, &modal.rect)) {
-                            modal.open = 0;
-                        }
+            if (event.type == SDL_QUIT) { running = 0; }
+            else if (event.type == SDL_WINDOWEVENT) {
+                if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+                    int new_w = event.window.data1, new_h = event.window.data2;
+                    if (new_w != last_w || new_h != last_h) {
+                        last_w = new_w; last_h = new_h;
+                        need_recreate = 1;
                     }
-                    // não processa mais cliques "abaixo" enquanto modal aberto
+                }
+            } else if (event.type == SDL_KEYDOWN) {
+                if (event.key.keysym.sym == SDLK_ESCAPE) { if (modal.open) modal.open = 0; else running = 0; }
+            } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+                int mx = event.button.x, my = event.button.y;
+
+                if (modal.open) {
+                    if (isPointInRect(mx, my, &modal.closeBtn)) modal.open = 0;
+                    else if (!isPointInRect(mx, my, &modal.rect)) modal.open = 0;
                     continue;
                 }
 
-                // se volume sub-dropdown aberto, prioriza interações com ele
                 if (volumeDropdownOpen) {
-                    // posição do dropdown de áudio
                     int dx = menuBoxes[3].x;
                     int dy = MENU_HEIGHT;
-                    int width = menuBoxes[3].w;
-                    if (width < 160) width = 160;
-                    // volume sub-dropdown desenhado à direita do dropdown de áudio
+                    int width = menuBoxes[3].w; if (width < 160) width = 160;
                     int vdx = dx + width;
                     int vdy = dy;
                     int itemH = 24;
-                    SDL_Rect vRect = {vdx, vdy, 120, itemH * volumeCount};
+                    int vwidth = 120;
+                    if (vdx + vwidth > win_w - 8) vdx = dx - vwidth;
+                    if (vdx < 8) vdx = 8;
+                    SDL_Rect vRect = {vdx, vdy, vwidth, itemH * volumeCount};
 
-                    // clique dentro do volume sub-dropdown?
-                    if (mx >= vRect.x && mx <= vRect.x + vRect.w &&
-                        my >= vRect.y && my <= vRect.y + vRect.h) {
+                    if (mx >= vRect.x && mx <= vRect.x + vRect.w && my >= vRect.y && my <= vRect.y + vRect.h) {
                         int idx = (my - vRect.y) / itemH;
-                        if (idx >= 0 && idx < volumeCount) {
-                            // seleciona volume
-                            currentVolume = idx * 10;
-                            muted = 0; // desliga mute ao ajustar volume
-                            SDL_Log("Volume set to %d%%", currentVolume);
-                            volumeDropdownOpen = 0;
-                        }
+                        if (idx >= 0 && idx < volumeCount) { currentVolume = idx * 10; muted = 0; SDL_Log("Volume set to %d%%", currentVolume); volumeDropdownOpen = 0; }
                         continue;
-                    } else {
-                        // clique fora do volume sub-dropdown fecha ele (mas não fecha o dropdown principal automaticamente)
-                        volumeDropdownOpen = 0;
-                        // continue to allow other click handling below
-                    }
+                    } else { volumeDropdownOpen = 0; }
                 }
 
-                // clique dentro da barra de menus?
                 if (my >= 0 && my < MENU_HEIGHT) {
                     int clickedMenu = -1;
                     for (int i = 0; i < numMenus; ++i) {
                         SDL_Rect m = menuBoxes[i];
-                        if (mx >= m.x && mx <= m.x + m.w) {
-                            clickedMenu = i;
-                            break;
-                        }
+                        if (mx >= m.x && mx <= m.x + m.w) { clickedMenu = i; break; }
                     }
                     if (clickedMenu >= 0) {
-                        // toggle: se já aberto, fecha; senão abre
-                        if (menuSelecionado == clickedMenu) {
-                            menuSelecionado = -1;
-                            volumeDropdownOpen = 0;
-                        } else {
-                            menuSelecionado = clickedMenu;
-                            volumeDropdownOpen = 0;
-                        }
+                        if (menuSelecionado == clickedMenu) { menuSelecionado = -1; volumeDropdownOpen = 0; }
+                        else { menuSelecionado = clickedMenu; volumeDropdownOpen = 0; }
                     }
                 } else {
-                    // clique fora da barra: verificar se clicou dentro do dropdown aberto
                     if (menuSelecionado != -1) {
                         int dx = menuBoxes[menuSelecionado].x;
                         int dy = MENU_HEIGHT;
                         int itemH = 24;
                         int count = dropdownCounts[menuSelecionado];
-                        int width = menuBoxes[menuSelecionado].w;
-                        if (width < 160) width = 160;
-                        SDL_Rect dropRect = {dx, dy, width, itemH * count};
+                        int width = menuBoxes[menuSelecionado].w; if (width < 160) width = 160;
 
-                        if (count > 0 && mx >= dropRect.x && mx <= dropRect.x + dropRect.w &&
-                            my >= dropRect.y && my <= dropRect.y + dropRect.h) {
-                            // clicou em uma opção do dropdown
+                        int draw_dx = dx;
+                        if (draw_dx + width > win_w - 8) {
+                            int newdx = win_w - 8 - width;
+                            if (newdx < 8) newdx = 8;
+                            draw_dx = newdx;
+                        }
+                        if (draw_dx < 8) draw_dx = 8;
+
+                        SDL_Rect dropRect = {draw_dx, dy, width, itemH * count};
+
+                        if (count > 0 && mx >= dropRect.x && mx <= dropRect.x + dropRect.w && my >= dropRect.y && my <= dropRect.y + dropRect.h) {
                             int idx = (my - dropRect.y) / itemH;
                             if (idx >= 0 && idx < count) {
                                 const char* escolha = allDropdowns[menuSelecionado][idx];
 
-                                // comportamento especial por menu/opção
-                                if (menuSelecionado == 0) { // Cartucho
-                                    if (strcmp(escolha, "Sair") == 0) {
-                                        running = 0; // sair do app
-                                    } else if (strcmp(escolha, "Ejetar") == 0) {
-                                        // Ejetar: NÃO abre modal; apenas registra ação (substitua por ação real)
-                                        SDL_Log("Ação: Ejetar cartucho");
-                                    } else {
-                                        // abre modal para outras opções do Cartucho
-                                        openModalWithTitle(&modal, escolha);
-                                    }
-                                } else if (menuSelecionado == 1) { // Tela
+                                if (menuSelecionado == 0) {
+                                    if (strcmp(escolha, "Sair") == 0) running = 0;
+                                    else if (strcmp(escolha, "Ejetar") == 0) SDL_Log("Ação: Ejetar cartucho");
+                                    else openModalWithTitle(&modal, escolha);
+                                } else if (menuSelecionado == 1) {
                                     if (strcmp(escolha, "Fullscreen") == 0) {
-                                        // Fullscreen: alterna modo fullscreen, NÃO abre modal
                                         toggleFullscreen(window);
-                                    } else {
-                                        // outras opções abrem modal
-                                        openModalWithTitle(&modal, escolha);
-                                    }
-                                } else if (menuSelecionado == 2) { // Sistema
-                                    // Reiniciar / Salvar Estado / Carregar Estado: NÃO abrem modal, apenas log por enquanto
-                                    if (strcmp(escolha, "Reiniciar") == 0) {
-                                        SDL_Log("Ação: Reiniciar sistema (placeholder)");
-                                    } else if (strcmp(escolha, "Salvar Estado") == 0) {
-                                        SDL_Log("Ação: Salvar estado (placeholder)");
-                                    } else if (strcmp(escolha, "Carregar Estado") == 0) {
-                                        SDL_Log("Ação: Carregar estado (placeholder)");
-                                    }
-                                } else if (menuSelecionado == 3) { // Áudio
-                                    if (strcmp(escolha, "Volume") == 0) {
-                                        // abre sub-dropdown de volume (não abre modal)
-                                        volumeDropdownOpen = 1;
-                                    } else if (strcmp(escolha, "Mute") == 0) {
-                                        // não abre modal; alterna mute
-                                        muted = !muted;
-                                        SDL_Log("Mute toggled: %d", muted);
-                                    } else {
-                                        // Mixer ou outras abrem modal
-                                        openModalWithTitle(&modal, escolha);
-                                    }
-                                } else if (menuSelecionado == 4) { // Configuração
-                                    openModalWithTitle(&modal, escolha);
-                                } else if (menuSelecionado == 5) { // Ajuda
-                                    openModalWithTitle(&modal, escolha);
-                                }
-                                // fecha dropdown principal após clique (exceto quando volume sub-dropdown deve permanecer aberto)
-                                if (!(menuSelecionado == 3 && strcmp(escolha, "Volume") == 0)) {
-                                    menuSelecionado = -1;
-                                }
+                                        // after toggling fullscreen, we'll check fullscreen change below and set need_recreate if size changed
+                                    } else openModalWithTitle(&modal, escolha);
+                                } else if (menuSelecionado == 2) {
+                                    if (strcmp(escolha, "Reiniciar") == 0) SDL_Log("Ação: Reiniciar sistema (placeholder)");
+                                    else if (strcmp(escolha, "Salvar Estado") == 0) SDL_Log("Ação: Salvar estado (placeholder)");
+                                    else if (strcmp(escolha, "Carregar Estado") == 0) SDL_Log("Ação: Carregar estado (placeholder)");
+                                } else if (menuSelecionado == 3) {
+                                    if (strcmp(escolha, "Volume") == 0) volumeDropdownOpen = 1;
+                                    else if (strcmp(escolha, "Mute") == 0) { muted = !muted; SDL_Log("Mute toggled: %d", muted); }
+                                    else openModalWithTitle(&modal, escolha);
+                                } else if (menuSelecionado == 4) openModalWithTitle(&modal, escolha);
+                                else if (menuSelecionado == 5) openModalWithTitle(&modal, escolha);
+
+                                if (!(menuSelecionado == 3 && strcmp(escolha, "Volume") == 0)) menuSelecionado = -1;
                             }
                         } else {
-                            // clique fora do dropdown: fecha
                             menuSelecionado = -1;
                             volumeDropdownOpen = 0;
                         }
@@ -478,80 +409,97 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // gerar sweep RGB (mesma lógica anterior)
-        for (int y = 0; y < HEIGHT; y++) {
-            for (int x = 0; x < WIDTH; x++) {
-                int raw = (x + y - frame) % 128;
-                if (raw < 0) raw += 128;
+        // detect fullscreen change and mark recreate only if size actually changed
+        {
+            Uint32 flags_now = SDL_GetWindowFlags(window);
+            int now_fullscreen = (flags_now & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 1 : 0;
+            if (now_fullscreen != prev_fullscreen) {
+                int w, h; SDL_GetWindowSize(window, &w, &h);
+                if (w != last_w || h != last_h) {
+                    last_w = w; last_h = h;
+                    need_recreate = 1;
+                }
+                prev_fullscreen = now_fullscreen;
+            }
+        }
 
-                int tri = abs(raw - 64);
-                Uint8 v = tri / 4;
+        // perform recreate once per loop if needed
+        if (need_recreate) {
+            if (!recreateTextureAndBuffer(renderer, last_w, last_h)) {
+                SDL_Log("Falha ao recriar texture/buffer");
+            }
+            need_recreate = 0;
+        }
 
+        // gerar sweep RGB
+        for (int y = 0; y < win_h; y++) {
+            for (int x = 0; x < win_w; x++) {
+                int raw = (x + y - frame) % 128; if (raw < 0) raw += 128;
+                int tri = abs(raw - 64); Uint8 v = tri / 4;
                 Uint8 r = v, g = v, b = v;
                 int colorPhase = (frame / 60) % 3;
-
                 if (tri % 64 == 0) {
                     if (colorPhase == 0) g += v * 6;
                     else if (colorPhase == 1) b += v * 6;
                     else if (colorPhase == 2) r += v * 6;
                 }
-
-                pixels[y * WIDTH + x] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+                pixels[y * win_w + x] = (0xFF << 24) | (r << 16) | (g << 8) | b;
             }
         }
 
-        SDL_UpdateTexture(texture, NULL, pixels, WIDTH * sizeof(Uint32));
+        SDL_UpdateTexture(texture, NULL, pixels, win_w * sizeof(Uint32));
         SDL_RenderClear(renderer);
-
-        // desenha sweep RGB
         SDL_RenderCopy(renderer, texture, NULL, NULL);
 
-        // desenha barra superior
         drawMenuBar(renderer, font);
 
-        // desenha dropdown se algum menu estiver selecionado
         if (menuSelecionado >= 0 && menuSelecionado < numMenus) {
             int dx = menuBoxes[menuSelecionado].x;
             int dy = MENU_HEIGHT;
             int count = dropdownCounts[menuSelecionado];
-            int width = menuBoxes[menuSelecionado].w;
-            if (width < 160) width = 160;
-            drawDropdown(renderer, font, allDropdowns[menuSelecionado], count, dx, dy, width);
+            int width = menuBoxes[menuSelecionado].w; if (width < 160) width = 160;
 
-            // se volume sub-dropdown estiver aberto e o menu selecionado for Áudio (3), desenha-o
+            int draw_dx = dx;
+            if (draw_dx + width > win_w - 8) {
+                int newdx = win_w - 8 - width;
+                if (newdx < 8) newdx = 8;
+                draw_dx = newdx;
+            }
+            if (draw_dx < 8) draw_dx = 8;
+
+            drawDropdown(renderer, font, allDropdowns[menuSelecionado], count, draw_dx, dy, width);
+
             if (menuSelecionado == 3 && volumeDropdownOpen) {
-                int vdx = dx + width; // desenha à direita do dropdown de áudio
+                int vdx = draw_dx + width;
                 int vdy = dy;
                 int vwidth = 120;
+                if (vdx + vwidth > win_w - 8) vdx = draw_dx - vwidth;
+                if (vdx < 8) vdx = 8;
                 drawDropdown(renderer, font, volumeItems, volumeCount, vdx, vdy, vwidth);
             }
         }
 
-        // desenha modal por cima de tudo (se aberto)
         drawModal(renderer, font, &modal);
 
-        // desenha indicador de volume/mute no canto superior direito (opcional, informativo)
         {
             char buf[64];
             if (muted) snprintf(buf, sizeof(buf), "Muted");
-            else if (currentVolume >= 0) snprintf(buf, sizeof(buf), "Vol: %d%%", currentVolume);
-            else snprintf(buf, sizeof(buf), "Vol: --");
+            else snprintf(buf, sizeof(buf), "Vol: %d%%", currentVolume);
             SDL_Color black = {0,0,0,255};
             SDL_Surface* s = TTF_RenderUTF8_Solid(font, buf, black);
             SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
-            SDL_Rect dst = {WIDTH - s->w - 12, 6, s->w, s->h};
+            int right_margin = 12;
+            SDL_Rect dst = {win_w - s->w - right_margin, 6, s->w, s->h};
             SDL_RenderCopy(renderer, t, NULL, &dst);
             SDL_FreeSurface(s);
             SDL_DestroyTexture(t);
         }
 
         SDL_RenderPresent(renderer);
-
         frame++;
         SDL_Delay(16);
     }
 
-    // limpeza final
     TTF_CloseFont(font);
     free(pixels);
     SDL_DestroyTexture(texture);
@@ -561,3 +509,6 @@ int main(int argc, char* argv[]) {
     SDL_Quit();
     return 0;
 }
+ 
+ / *   T O D O :   a j u s t a r   p o s i c i o n a m e n t o   d e   d r o p d o w n s   q u a n d o   m e n u s   f i c a m   e n c o s t a d o s   n a s   b o r d a s   ( e d g e - c a s e ) .   * /  
+ 
