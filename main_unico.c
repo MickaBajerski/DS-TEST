@@ -48,8 +48,9 @@ const int volumeCount = sizeof(volumeItems)/sizeof(volumeItems[0]);
 
 // estado do volume sub-dropdown
 int volumeDropdownOpen = 0;
-int currentVolume = -1; // -1 = não definido
+int currentVolume = 100; // inicia em 100%
 int muted = 0;
+
 
 // Modal genérico (apenas 1 modal aberto por vez)
 typedef struct {
