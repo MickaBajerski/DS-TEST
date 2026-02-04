@@ -2,6 +2,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define WIDTH 800
 #define HEIGHT 600
@@ -37,6 +38,16 @@ const int dropdownCounts[] = {
         sizeof(dropdownItems4)/sizeof(dropdownItems4[0]),
         sizeof(dropdownItems5)/sizeof(dropdownItems5[0])
 };
+
+// Modal genérico (apenas 1 modal aberto por vez)
+typedef struct {
+    int open;
+    char title[128];
+    SDL_Rect rect;      // posição e tamanho da janela
+    SDL_Rect closeBtn;  // área do botão X
+} Modal;
+
+Modal modal = {0};
 
 // calcula as caixas dos menus (usa a fonte para medir largura)
 void computeMenuBoxes(TTF_Font* font) {
@@ -96,7 +107,7 @@ void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], i
     int mx, my;
     SDL_GetMouseState(&mx, &my);
 
-    for (int i = 0; i < numItems; i++) {
+    for (int i = 0; i < numItems; ++i) {
         SDL_Rect rect = {x, y + i * itemHeight, width, itemHeight};
 
         // hover highlight para cada item
@@ -120,6 +131,83 @@ void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], i
         SDL_FreeSurface(surface);
         SDL_DestroyTexture(texture);
     }
+}
+
+// desenha modal genérico com título e botão X
+void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
+    if (!m->open) return;
+
+    // fundo semi-transparente (overlay)
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 120);
+    SDL_Rect overlay = {0, 0, WIDTH, HEIGHT};
+    SDL_RenderFillRect(renderer, &overlay);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+
+    // janela
+    SDL_SetRenderDrawColor(renderer, 220, 220, 220, 255);
+    SDL_RenderFillRect(renderer, &m->rect);
+
+    // borda
+    SDL_SetRenderDrawColor(renderer, 80, 80, 80, 255);
+    SDL_RenderDrawRect(renderer, &m->rect);
+
+    // título
+    SDL_Color black = {0,0,0,255};
+    SDL_Surface* sTitle = TTF_RenderUTF8_Solid(font, m->title, black);
+    SDL_Texture* tTitle = SDL_CreateTextureFromSurface(renderer, sTitle);
+    int titleY = m->rect.y + 8;
+    SDL_Rect dstTitle = {m->rect.x + 12, titleY, sTitle->w, sTitle->h};
+    SDL_RenderCopy(renderer, tTitle, NULL, &dstTitle);
+    SDL_FreeSurface(sTitle);
+    SDL_DestroyTexture(tTitle);
+
+    // botão X (close)
+    SDL_SetRenderDrawColor(renderer, 200, 80, 80, 255);
+    SDL_RenderFillRect(renderer, &m->closeBtn);
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    // desenha um X simples
+    int cx = m->closeBtn.x + 4;
+    int cy = m->closeBtn.y + 4;
+    int cw = m->closeBtn.w - 8;
+    int ch = m->closeBtn.h - 8;
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    SDL_RenderDrawLine(renderer, cx, cy, cx + cw, cy + ch);
+    SDL_RenderDrawLine(renderer, cx + cw, cy, cx, cy + ch);
+
+    // conteúdo placeholder (texto)
+    const char* placeholder = "Conteúdo da janela (substituir depois)";
+    SDL_Surface* sCont = TTF_RenderUTF8_Solid(font, placeholder, black);
+    SDL_Texture* tCont = SDL_CreateTextureFromSurface(renderer, sCont);
+    SDL_Rect dstCont = {m->rect.x + 12, m->rect.y + 40, sCont->w, sCont->h};
+    SDL_RenderCopy(renderer, tCont, NULL, &dstCont);
+    SDL_FreeSurface(sCont);
+    SDL_DestroyTexture(tCont);
+}
+
+// abre modal com título e tamanho padrão (centralizado)
+void openModalWithTitle(Modal* m, const char* title) {
+    m->open = 1;
+    strncpy(m->title, title, sizeof(m->title)-1);
+    m->title[sizeof(m->title)-1] = '\0';
+
+    int w = 480;
+    int h = 220;
+    m->rect.x = (WIDTH - w) / 2;
+    m->rect.y = (HEIGHT - h) / 2;
+    m->rect.w = w;
+    m->rect.h = h;
+
+    // close button (20x20) no canto superior direito da janela
+    m->closeBtn.w = 24;
+    m->closeBtn.h = 24;
+    m->closeBtn.x = m->rect.x + m->rect.w - m->closeBtn.w - 8;
+    m->closeBtn.y = m->rect.y + 8;
+}
+
+// verifica clique no botão X do modal
+int isPointInRect(int px, int py, SDL_Rect* r) {
+    return (px >= r->x && px <= r->x + r->w && py >= r->y && py <= r->y + r->h);
 }
 
 int main(int argc, char* argv[]) {
@@ -209,9 +297,30 @@ int main(int argc, char* argv[]) {
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = 0;
+            } else if (event.type == SDL_KEYDOWN) {
+                if (event.key.keysym.sym == SDLK_ESCAPE) {
+                    // ESC fecha modal se aberto, senão fecha app
+                    if (modal.open) modal.open = 0;
+                    else running = 0;
+                }
             } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
                 int mx = event.button.x;
                 int my = event.button.y;
+
+                // se modal aberto, prioriza interações com ele
+                if (modal.open) {
+                    // clique no X?
+                    if (isPointInRect(mx, my, &modal.closeBtn)) {
+                        modal.open = 0;
+                    } else {
+                        // clique fora da janela fecha modal
+                        if (!isPointInRect(mx, my, &modal.rect)) {
+                            modal.open = 0;
+                        }
+                    }
+                    // não processa mais cliques "abaixo" enquanto modal aberto
+                    continue;
+                }
 
                 // clique dentro da barra de menus?
                 if (my >= 0 && my < MENU_HEIGHT) {
@@ -245,8 +354,9 @@ int main(int argc, char* argv[]) {
                             int idx = (my - dropRect.y) / itemH;
                             if (idx >= 0 && idx < count) {
                                 const char* escolha = allDropdowns[menuSelecionado][idx];
-                                SDL_Log("Menu %d selecionou: %s", menuSelecionado, escolha);
-                                // ação simples: fechar o dropdown após seleção
+                                // abre modal com o título da opção clicada
+                                openModalWithTitle(&modal, escolha);
+                                // fecha dropdown
                                 menuSelecionado = -1;
                             }
                         } else {
@@ -298,6 +408,9 @@ int main(int argc, char* argv[]) {
             if (width < 160) width = 160;
             drawDropdown(renderer, font, allDropdowns[menuSelecionado], count, dx, dy, width);
         }
+
+        // desenha modal por cima de tudo (se aberto)
+        drawModal(renderer, font, &modal);
 
         SDL_RenderPresent(renderer);
 
