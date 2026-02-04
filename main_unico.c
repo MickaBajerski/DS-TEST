@@ -503,7 +503,56 @@ int main(int argc, char* argv[]) {
                 }
             } else if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_ESCAPE) { if (modal.open) modal.open = 0; else running = 0; }
-            } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+            }
+                // --- hover handling para abrir/fechar volumeDropdownOpen ---
+            else if (event.type == SDL_MOUSEMOTION) {
+                int mx = event.motion.x, my = event.motion.y;
+
+                // se o menu Áudio estiver aberto (menuSelecionado == 3), detecta hover sobre itens
+                if (menuSelecionado == 3) {
+                    int dx = menuBoxes[3].x;
+                    int dy = MENU_HEIGHT;
+                    int width = menuBoxes[3].w; if (width < DROPDOWN_MIN_WIDTH) width = DROPDOWN_MIN_WIDTH;
+                    int draw_dx = calc_draw_x(dx, width);
+                    int itemH = DROPDOWN_ITEM_HEIGHT;
+                    int count = dropdownCounts[3];
+
+                    SDL_Rect dropRect = { draw_dx, dy, width, itemH * count };
+
+                    if (mx >= dropRect.x && mx <= dropRect.x + dropRect.w && my >= dropRect.y && my <= dropRect.y + dropRect.h) {
+                        int idx = (my - dropRect.y) / itemH;
+                        if (idx >= 0 && idx < count) {
+                            const char* hovered = allDropdowns[3][idx];
+                            if (hovered && strcmp(hovered, "Volume") == 0) {
+                                volumeDropdownOpen = 1;
+                            } else {
+                                volumeDropdownOpen = 0;
+                            }
+                        } else {
+                            volumeDropdownOpen = 0;
+                        }
+                    } else {
+                        // se não estiver sobre o dropdown, permite manter aberto apenas se o mouse estiver sobre a subcaixa de volume
+                        int vwidth = VOLUME_SUB_WIDTH;
+                        int vdx = draw_dx + width;
+                        int vdy = dy;
+                        if (vdx + vwidth > win_w - EDGE_MARGIN) vdx = draw_dx - vwidth;
+                        if (vdx < EDGE_MARGIN) vdx = EDGE_MARGIN;
+                        SDL_Rect vRect = { vdx, vdy, vwidth, itemH * volumeCount };
+                        if (!(mx >= vRect.x && mx <= vRect.x + vRect.w && my >= vRect.y && my <= vRect.y + vRect.h)) {
+                            volumeDropdownOpen = 0;
+                        }
+                    }
+                } else {
+                    // se menu Áudio não está aberto, fecha subbox
+                    volumeDropdownOpen = 0;
+                }
+
+                // não alterar menuSelecionado aqui; apenas hover para subbox
+                continue;
+            }
+                // --- clique do mouse (LEFT) ---
+            else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
                 int mx = event.button.x, my = event.button.y;
 
                 if (modal.open) {
@@ -512,24 +561,65 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
+                // se a subcaixa de volume estiver aberta, tratar clique nela primeiro
+                // se a subcaixa de volume estiver aberta, tratar clique nela primeiro
                 if (volumeDropdownOpen) {
                     int dx = menuBoxes[3].x;
                     int dy = MENU_HEIGHT;
                     int width = menuBoxes[3].w; if (width < DROPDOWN_MIN_WIDTH) width = DROPDOWN_MIN_WIDTH;
-                    int vdx = dx + width;
-                    int vdy = dy;
-                    int vwidth = VOLUME_SUB_WIDTH;
-                    if (vdx + vwidth > win_w - EDGE_MARGIN) vdx = dx - vwidth;
-                    if (vdx < EDGE_MARGIN) vdx = EDGE_MARGIN;
-                    SDL_Rect vRect = {vdx, vdy, vwidth, DROPDOWN_ITEM_HEIGHT * volumeCount};
+                    int draw_dx = calc_draw_x(dx, width);
+                    int itemH = DROPDOWN_ITEM_HEIGHT;
 
+                    // posição da subcaixa de volume (vRect)
+                    int vwidth = VOLUME_SUB_WIDTH;
+                    int vdx = draw_dx + width;
+                    int vdy = dy;
+                    if (vdx + vwidth > win_w - EDGE_MARGIN) vdx = draw_dx - vwidth;
+                    if (vdx < EDGE_MARGIN) vdx = EDGE_MARGIN;
+                    SDL_Rect vRect = {vdx, vdy, vwidth, itemH * volumeCount};
+
+                    // posição do dropdown pai (dropRect)
+                    int count = dropdownCounts[3];
+                    SDL_Rect dropRect = { draw_dx, dy, width, itemH * count };
+
+                    // 1) clique dentro da subcaixa de volume -> selecionar porcentagem
                     if (mx >= vRect.x && mx <= vRect.x + vRect.w && my >= vRect.y && my <= vRect.y + vRect.h) {
-                        int idx = (my - vRect.y) / DROPDOWN_ITEM_HEIGHT;
-                        if (idx >= 0 && idx < volumeCount) { currentVolume = idx * 10; muted = 0; SDL_Log("Volume set to %d%%", currentVolume); volumeDropdownOpen = 0; }
+                        int idx = (my - vRect.y) / itemH;
+                        if (idx >= 0 && idx < volumeCount) {
+                            currentVolume = idx * 10;
+                            muted = 0;
+                            SDL_Log("Volume set to %d%%", currentVolume);
+                            volumeDropdownOpen = 0;
+                        }
                         continue;
-                    } else { volumeDropdownOpen = 0; }
+                    }
+
+                    // 2) clique dentro do dropdown pai
+                    if (mx >= dropRect.x && mx <= dropRect.x + dropRect.w && my >= dropRect.y && my <= dropRect.y + dropRect.h) {
+                        int idx = (my - dropRect.y) / itemH;
+                        if (idx >= 0 && idx < count) {
+                            const char* escolha = allDropdowns[3][idx];
+                            // se clicou em "Volume", IGNORAR clique (hover controla abertura) e manter subcaixa aberta
+                            if (escolha && strcmp(escolha, "Volume") == 0) {
+                                // nada a fazer; mantemos menu e subcaixa
+                                continue;
+                            }
+                            // caso contrário, deixe o fluxo normal tratar o clique (ex.: Mute, Mixer)
+                            // mas fechamos a subcaixa porque o clique foi em outro item do dropdown
+                            volumeDropdownOpen = 0;
+                            // não 'continue' aqui: deixamos o restante do handler processar a ação do item
+                        } else {
+                            // clique dentro do dropRect mas fora dos itens válidos -> fechar subcaixa
+                            volumeDropdownOpen = 0;
+                        }
+                    } else {
+                        // 3) clique fora de ambas as áreas -> fechar subcaixa
+                        volumeDropdownOpen = 0;
+                    }
                 }
 
+
+                // clique na barra de menu (abre/fecha menus)
                 if (my >= 0 && my < MENU_HEIGHT) {
                     int clickedMenu = -1;
                     for (int i = 0; i < numMenus; ++i) {
@@ -540,52 +630,58 @@ int main(int argc, char* argv[]) {
                         if (menuSelecionado == clickedMenu) { menuSelecionado = -1; volumeDropdownOpen = 0; }
                         else { menuSelecionado = clickedMenu; volumeDropdownOpen = 0; }
                     }
-                } else {
-                    if (menuSelecionado != -1) {
-                        int dx = menuBoxes[menuSelecionado].x;
-                        int dy = MENU_HEIGHT;
-                        int itemH = DROPDOWN_ITEM_HEIGHT;
-                        int count = dropdownCounts[menuSelecionado];
-                        int width = menuBoxes[menuSelecionado].w; if (width < DROPDOWN_MIN_WIDTH) width = DROPDOWN_MIN_WIDTH;
+                    continue;
+                }
 
-                        int draw_dx = calc_draw_x(dx, width);
+                // clique dentro de um dropdown aberto
+                if (menuSelecionado != -1) {
+                    int dx = menuBoxes[menuSelecionado].x;
+                    int dy = MENU_HEIGHT;
+                    int itemH = DROPDOWN_ITEM_HEIGHT;
+                    int count = dropdownCounts[menuSelecionado];
+                    int width = menuBoxes[menuSelecionado].w; if (width < DROPDOWN_MIN_WIDTH) width = DROPDOWN_MIN_WIDTH;
 
-                        SDL_Rect dropRect = {draw_dx, dy, width, itemH * count};
+                    int draw_dx = calc_draw_x(dx, width);
+                    SDL_Rect dropRect = {draw_dx, dy, width, itemH * count};
 
-                        if (count > 0 && mx >= dropRect.x && mx <= dropRect.x + dropRect.w && my >= dropRect.y && my <= dropRect.y + dropRect.h) {
-                            int idx = (my - dropRect.y) / itemH;
-                            if (idx >= 0 && idx < count) {
-                                const char* escolha = allDropdowns[menuSelecionado][idx];
+                    if (count > 0 && mx >= dropRect.x && mx <= dropRect.x + dropRect.w && my >= dropRect.y && my <= dropRect.y + dropRect.h) {
+                        int idx = (my - dropRect.y) / itemH;
+                        if (idx >= 0 && idx < count) {
+                            const char* escolha = allDropdowns[menuSelecionado][idx];
 
-                                if (menuSelecionado == 0) {
-                                    if (strcmp(escolha, "Sair") == 0) running = 0;
-                                    else if (strcmp(escolha, "Ejetar") == 0) SDL_Log("Ação: Ejetar cartucho");
-                                    else openModalWithTitle(&modal, escolha);
-                                } else if (menuSelecionado == 1) {
-                                    if (strcmp(escolha, "Fullscreen") == 0) {
-                                        toggleFullscreen(window);
-                                    } else openModalWithTitle(&modal, escolha);
-                                } else if (menuSelecionado == 2) {
-                                    if (strcmp(escolha, "Reiniciar") == 0) SDL_Log("Ação: Reiniciar sistema (placeholder)");
-                                    else if (strcmp(escolha, "Salvar Estado") == 0) SDL_Log("Ação: Salvar estado (placeholder)");
-                                    else if (strcmp(escolha, "Carregar Estado") == 0) SDL_Log("Ação: Carregar estado (placeholder)");
-                                } else if (menuSelecionado == 3) {
-                                    if (strcmp(escolha, "Volume") == 0) volumeDropdownOpen = 1;
-                                    else if (strcmp(escolha, "Mute") == 0) { muted = !muted; SDL_Log("Mute toggled: %d", muted); }
-                                    else openModalWithTitle(&modal, escolha);
-                                } else if (menuSelecionado == 4) openModalWithTitle(&modal, escolha);
-                                else if (menuSelecionado == 5) openModalWithTitle(&modal, escolha);
-
-                                if (!(menuSelecionado == 3 && strcmp(escolha, "Volume") == 0)) menuSelecionado = -1;
+                            // se for o item "Volume" no menu Áudio, IGNORAR clique (hover controla abertura)
+                            if (menuSelecionado == 3 && escolha && strcmp(escolha, "Volume") == 0) {
+                                // nada a fazer; mantemos o menu aberto e a subcaixa controlada por hover
                             }
-                        } else {
-                            menuSelecionado = -1;
-                            volumeDropdownOpen = 0;
+                            else if (menuSelecionado == 0) {
+                                if (strcmp(escolha, "Sair") == 0) running = 0;
+                                else if (strcmp(escolha, "Ejetar") == 0) SDL_Log("Ação: Ejetar cartucho");
+                                else openModalWithTitle(&modal, escolha);
+                            } else if (menuSelecionado == 1) {
+                                if (strcmp(escolha, "Fullscreen") == 0) {
+                                    toggleFullscreen(window);
+                                } else openModalWithTitle(&modal, escolha);
+                            } else if (menuSelecionado == 2) {
+                                if (strcmp(escolha, "Reiniciar") == 0) SDL_Log("Ação: Reiniciar sistema (placeholder)");
+                                else if (strcmp(escolha, "Salvar Estado") == 0) SDL_Log("Ação: Salvar estado (placeholder)");
+                                else if (strcmp(escolha, "Carregar Estado") == 0) SDL_Log("Ação: Carregar estado (placeholder)");
+                            } else if (menuSelecionado == 3) {
+                                // outros itens do menu Áudio (exceto "Volume") continuam funcionando
+                                if (strcmp(escolha, "Mute") == 0) { muted = !muted; SDL_Log("Mute toggled: %d", muted); }
+                                else if (strcmp(escolha, "Mixer") == 0) openModalWithTitle(&modal, escolha);
+                            } else if (menuSelecionado == 4) openModalWithTitle(&modal, escolha);
+                            else if (menuSelecionado == 5) openModalWithTitle(&modal, escolha);
+
+                            // fechar menu, exceto quando clicamos (ou ignoramos) em "Volume"
+                            if (!(menuSelecionado == 3 && escolha && strcmp(escolha, "Volume") == 0)) menuSelecionado = -1;
                         }
+                    } else {
+                        menuSelecionado = -1;
+                        volumeDropdownOpen = 0;
                     }
                 }
             }
-        }
+        } // fim do loop de eventos
 
         // detect fullscreen change and mark recreate only if size actually changed
         {
