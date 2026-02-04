@@ -90,14 +90,28 @@ void drawMenuBar(SDL_Renderer* renderer, TTF_Font* font) {
 // desenha um dropdown com largura e altura baseados em parâmetros
 void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], int numItems, int x, int y, int width) {
     SDL_Color black = {0, 0, 0, 255};
+    SDL_Color white = {255, 255, 255, 255};
     int itemHeight = 24;
 
-    for (int i = 0; i < numItems; ++i) {
+    int mx, my;
+    SDL_GetMouseState(&mx, &my);
+
+    for (int i = 0; i < numItems; i++) {
         SDL_Rect rect = {x, y + i * itemHeight, width, itemHeight};
-        SDL_SetRenderDrawColor(renderer, 80, 80, 80, 255);
+
+        // hover highlight para cada item
+        int isHover = (mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h);
+
+        if (isHover) {
+            SDL_SetRenderDrawColor(renderer, 120, 120, 120, 255); // destaque do item
+        } else {
+            SDL_SetRenderDrawColor(renderer, 80, 80, 80, 255); // fundo normal
+        }
         SDL_RenderFillRect(renderer, &rect);
 
-        SDL_Surface* surface = TTF_RenderUTF8_Solid(font, items[i], black);
+        // renderiza texto; cor diferente quando hover
+        SDL_Color textColor = isHover ? white : black;
+        SDL_Surface* surface = TTF_RenderUTF8_Solid(font, items[i], textColor);
         SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
 
         SDL_Rect dst = {x + 8, y + 4 + i * itemHeight, surface->w, surface->h};
