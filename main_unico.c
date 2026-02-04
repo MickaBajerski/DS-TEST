@@ -6,6 +6,7 @@
 #include <SDL2/SDL_ttf.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define DEFAULT_WIDTH 800
 #define DEFAULT_HEIGHT 600
@@ -19,9 +20,7 @@ static const int DROPDOWN_MIN_WIDTH = 160;
 static const int EDGE_MARGIN = 8;
 static const int DROPDOWN_ITEM_HEIGHT = 24;
 static const int VOLUME_SUB_WIDTH = 120;
-static const int CLOSE_BTN_SIZE = 24
-
-; // small formatting helper
+static const int CLOSE_BTN_SIZE = 24;
 
 int menuSelecionado = -1; // -1 = nenhum menu aberto
 
@@ -198,7 +197,7 @@ void drawMenuBar(SDL_Renderer* renderer, TTF_Font* font) {
         int h = menuBoxes[i].h;
 
         if (mx >= x && mx <= x + w && my >= y && my <= y + h) {
-            SDL_SetRenderDrawColor(renderer, 180, 180, 180, 255);
+            SDL_SetRenderDrawColor(renderer, 130, 130, 130, 255);
             SDL_Rect r = {x, y, w, h};
             SDL_RenderFillRect(renderer, &r);
         }
@@ -269,7 +268,7 @@ void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
     SDL_RenderFillRect(renderer, &overlay);
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 
-    SDL_SetRenderDrawColor(renderer, 220,220,220,255);
+    SDL_SetRenderDrawColor(renderer, 120,120,120,255);
     SDL_RenderFillRect(renderer, &m->rect);
     SDL_SetRenderDrawColor(renderer, 80,80,80,255);
     SDL_RenderDrawRect(renderer, &m->rect);
@@ -368,8 +367,90 @@ void drawVolumeIndicator(SDL_Renderer* renderer, TTF_Font* font) {
     SDL_DestroyTexture(t);
 }
 
+// -------------------- Smooth color animation (peak-synced) --------------------
+
+typedef struct {
+    // start color (at beginning of transition)
+    float sr, sg, sb;
+    // target color (end of transition)
+    float tr, tg, tb;
+    // elapsed time and duration
+    float t;
+    float duration;
+} ColorAnim;
+
+#define NUM_COLOR_ANIMS 3
+static ColorAnim colorAnims[NUM_COLOR_ANIMS];
+
+// linear interpolation
+static inline float lerp_f(float a, float b, float t) { return a + (b - a) * t; }
+
+// smoothstep easing (ease in/out)
+static inline float smoothstep_f(float t) {
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// pick a new random target color in a pleasant range
+static void pick_new_target(ColorAnim* ca) {
+    // choose target in [0.15, 1.0] to avoid too dark
+    ca->tr = 0.15f + ((float)rand() / (float)RAND_MAX) * 0.85f;
+    ca->tg = 0.15f + ((float)rand() / (float)RAND_MAX) * 0.85f;
+    ca->tb = 0.15f + ((float)rand() / (float)RAND_MAX) * 0.85f;
+    // reset elapsed time (start of new transition)
+    ca->t = 0.0f;
+}
+
+// initialize animations; duration_seconds is how long each transition takes (base)
+static void init_color_anims(float duration_seconds) {
+    for (int i = 0; i < NUM_COLOR_ANIMS; ++i) {
+        // start from a mid tone
+        colorAnims[i].sr = colorAnims[i].sg = colorAnims[i].sb = 0.5f;
+        colorAnims[i].duration = duration_seconds;
+        pick_new_target(&colorAnims[i]);
+    }
+}
+
+// update animations by delta seconds; speedMultiplier >1.0 accelerates transitions (used on peaks)
+static void update_color_anims(float delta, float speedMultiplier) {
+    for (int i = 0; i < NUM_COLOR_ANIMS; ++i) {
+        ColorAnim* ca = &colorAnims[i];
+        // advance time scaled by multiplier (faster during peaks)
+        ca->t += delta * speedMultiplier;
+
+        // if finished, finalize and start next transition preserving leftover time
+        if (ca->t >= ca->duration) {
+            float leftover = ca->t - ca->duration;
+            // set start to previous target
+            ca->sr = ca->tr;
+            ca->sg = ca->tg;
+            ca->sb = ca->tb;
+            // pick new target and carry leftover into it
+            pick_new_target(ca);
+            ca->t = leftover;
+            if (ca->t > ca->duration) ca->t = ca->duration;
+        }
+    }
+}
+
+// get current interpolated color into out[3] (r,g,b) using smoothstep easing
+static void get_anim_color(const ColorAnim* ca, float out[3]) {
+    float tt = ca->t / ca->duration;
+    if (tt < 0.0f) tt = 0.0f;
+    if (tt > 1.0f) tt = 1.0f;
+    float e = smoothstep_f(tt);
+    out[0] = lerp_f(ca->sr, ca->tr, e);
+    out[1] = lerp_f(ca->sg, ca->tg, e);
+    out[2] = lerp_f(ca->sb, ca->tb, e);
+}
+
+// -------------------- end color animation --------------------
+
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
+    srand((unsigned)time(NULL));
+
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { SDL_Log("SDL_Init error: %s", SDL_GetError()); return 1; }
     if (TTF_Init() != 0) { SDL_Log("TTF_Init error: %s", TTF_GetError()); SDL_Quit(); return 1; }
 
@@ -397,6 +478,10 @@ int main(int argc, char* argv[]) {
     int last_w = win_w;
     int last_h = win_h;
     int need_recreate = 0;
+
+    // timing for animations
+    Uint32 last_time = SDL_GetTicks();
+    init_color_anims(3.0f); // base duration in seconds (tweak as needed)
 
     while (running) {
         Uint32 flags = SDL_GetWindowFlags(window);
@@ -524,18 +609,52 @@ int main(int argc, char* argv[]) {
             need_recreate = 0;
         }
 
-        // gerar sweep RGB (preenche drawable buffer)
+        // --- timing and color animation update (peak-synced) ---
+        Uint32 now = SDL_GetTicks();
+        float delta = (now - last_time) / 1000.0f;
+        if (delta > 0.1f) delta = 0.1f;
+        last_time = now;
+
+        // detect peak rhythm: sincroniza com o "pico" do efeito (mesma cadência do colorPhase)
+        int isPeakFrame = (frame % 60) == 0;
+        // speed multiplier: acelera durante pico para que a cor acompanhe o pulso
+        float speedMultiplier = isPeakFrame ? 4.0f : 1.0f;
+
+        update_color_anims(delta, speedMultiplier);
+
+        // get interpolated colors for each anim
+        float animCols[NUM_COLOR_ANIMS][3];
+        for (int i = 0; i < NUM_COLOR_ANIMS; ++i) {
+            get_anim_color(&colorAnims[i], animCols[i]);
+        }
+
+        // gerar sweep RGB (preenche drawable buffer) usando cores suaves e punch sincronizado
         for (int y = 0; y < drawable_h; y++) {
             for (int x = 0; x < drawable_w; x++) {
                 int raw = (x + y - frame) % 128; if (raw < 0) raw += 128;
-                int tri = abs(raw - 64); Uint8 v = tri / 4;
-                Uint8 r = v, g = v, b = v;
-                int colorPhase = (frame / 60) % 3;
+                int tri = abs(raw - 64);
+                // intensidade base 0..1
+                float intensity = (float)tri / 64.0f;
+                if (intensity > 1.0f) intensity = 1.0f;
+
+                // combine anim colors with intensity; map each anim to a channel
+                float rf = animCols[0][0] * intensity;
+                float gf = animCols[1][1] * intensity;
+                float bf = animCols[2][2] * intensity;
+
+                // "punch" adicional nos pontos de tri%64==0, preservando suavidade
                 if (tri % 64 == 0) {
-                    if (colorPhase == 0) g += v * 6;
-                    else if (colorPhase == 1) b += v * 6;
-                    else if (colorPhase == 2) r += v * 6;
+                    int colorPhase = (frame / 60) % 3;
+                    float punch = intensity * 3.0f; // ajuste do ganho do pico
+                    if (colorPhase == 0) gf += punch;
+                    else if (colorPhase == 1) bf += punch;
+                    else if (colorPhase == 2) rf += punch;
                 }
+
+                int r = clamp_int((int)(rf * 255.0f), 0, 255);
+                int g = clamp_int((int)(gf * 255.0f), 0, 255);
+                int b = clamp_int((int)(bf * 255.0f), 0, 255);
+
                 pixels[y * drawable_w + x] = (0xFF << 24) | (r << 16) | (g << 8) | b;
             }
         }
