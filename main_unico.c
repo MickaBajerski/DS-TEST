@@ -18,12 +18,13 @@ const char* menus[] = {"Cartucho", "Tela", "Sistema", "Áudio", "Configuração"
 const int numMenus = 6;
 
 // dropdown items para cada menu
-const char* dropdownItems0[] = {"Inserir Cartucho", "Ejetar", "Info"};
-const char* dropdownItems1[] = {"Resolução", "Fullscreen", "Escala"};
-const char* dropdownItems2[] = {"Reiniciar", "Salvar Estado", "Carregar Estado"};
-const char* dropdownItems3[] = {"Volume", "Mute", "Mixer"};
-const char* dropdownItems4[] = {"Vídeo", "Áudio", "Controles", "Sistema"};
-const char* dropdownItems5[] = {"Documentação", "Sobre", "Sair"};
+// Todos os itens restaurados; alguns têm comportamento especial (não abrem modal).
+const char* dropdownItems0[] = {"Inserir Cartucho", "Ejetar", "Info", "Sair"}; // Cartucho
+const char* dropdownItems1[] = {"Resolução", "Fullscreen", "Escala"};           // Tela (Fullscreen restaurado)
+const char* dropdownItems2[] = {"Reiniciar", "Salvar Estado", "Carregar Estado"}; // Sistema (restaurado)
+const char* dropdownItems3[] = {"Volume", "Mute", "Mixer"};                     // Áudio
+const char* dropdownItems4[] = {"Vídeo", "Áudio", "Controles", "Sistema"};      // Configuração
+const char* dropdownItems5[] = {"Documentação", "Sobre"};                       // Ajuda
 
 const char** allDropdowns[] = {
         dropdownItems0, dropdownItems1, dropdownItems2,
@@ -39,6 +40,17 @@ const int dropdownCounts[] = {
         sizeof(dropdownItems5)/sizeof(dropdownItems5[0])
 };
 
+// volume sub-dropdown (0%..100% step 10)
+const char* volumeItems[] = {
+        "0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"
+};
+const int volumeCount = sizeof(volumeItems)/sizeof(volumeItems[0]);
+
+// estado do volume sub-dropdown
+int volumeDropdownOpen = 0;
+int currentVolume = -1; // -1 = não definido
+int muted = 0;
+
 // Modal genérico (apenas 1 modal aberto por vez)
 typedef struct {
     int open;
@@ -53,7 +65,7 @@ Modal modal = {0};
 void computeMenuBoxes(TTF_Font* font) {
     int x = 10;
     for (int i = 0; i < numMenus; ++i) {
-        int w, h;
+        int w = 0, h = 0;
         TTF_SizeUTF8(font, menus[i], &w, &h);
         menuBoxes[i].x = x;
         menuBoxes[i].y = 0;
@@ -100,6 +112,7 @@ void drawMenuBar(SDL_Renderer* renderer, TTF_Font* font) {
 
 // desenha um dropdown com largura e altura baseados em parâmetros
 void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], int numItems, int x, int y, int width) {
+    if (!items || numItems <= 0) return;
     SDL_Color black = {0, 0, 0, 255};
     SDL_Color white = {255, 255, 255, 255};
     int itemHeight = 24;
@@ -198,7 +211,7 @@ void openModalWithTitle(Modal* m, const char* title) {
     m->rect.w = w;
     m->rect.h = h;
 
-    // close button (20x20) no canto superior direito da janela
+    // close button (24x24) no canto superior direito da janela
     m->closeBtn.w = 24;
     m->closeBtn.h = 24;
     m->closeBtn.x = m->rect.x + m->rect.w - m->closeBtn.w - 8;
@@ -208,6 +221,18 @@ void openModalWithTitle(Modal* m, const char* title) {
 // verifica clique no botão X do modal
 int isPointInRect(int px, int py, SDL_Rect* r) {
     return (px >= r->x && px <= r->x + r->w && py >= r->y && py <= r->y + r->h);
+}
+
+// alterna fullscreen da janela (não abre modal)
+void toggleFullscreen(SDL_Window* window) {
+    Uint32 flags = SDL_GetWindowFlags(window);
+    if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) {
+        SDL_SetWindowFullscreen(window, 0);
+        SDL_Log("Fullscreen off");
+    } else {
+        SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+        SDL_Log("Fullscreen on");
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -322,6 +347,38 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
+                // se volume sub-dropdown aberto, prioriza interações com ele
+                if (volumeDropdownOpen) {
+                    // posição do dropdown de áudio
+                    int dx = menuBoxes[3].x;
+                    int dy = MENU_HEIGHT;
+                    int width = menuBoxes[3].w;
+                    if (width < 160) width = 160;
+                    // volume sub-dropdown desenhado à direita do dropdown de áudio
+                    int vdx = dx + width;
+                    int vdy = dy;
+                    int itemH = 24;
+                    SDL_Rect vRect = {vdx, vdy, 120, itemH * volumeCount};
+
+                    // clique dentro do volume sub-dropdown?
+                    if (mx >= vRect.x && mx <= vRect.x + vRect.w &&
+                        my >= vRect.y && my <= vRect.y + vRect.h) {
+                        int idx = (my - vRect.y) / itemH;
+                        if (idx >= 0 && idx < volumeCount) {
+                            // seleciona volume
+                            currentVolume = idx * 10;
+                            muted = 0; // desliga mute ao ajustar volume
+                            SDL_Log("Volume set to %d%%", currentVolume);
+                            volumeDropdownOpen = 0;
+                        }
+                        continue;
+                    } else {
+                        // clique fora do volume sub-dropdown fecha ele (mas não fecha o dropdown principal automaticamente)
+                        volumeDropdownOpen = 0;
+                        // continue to allow other click handling below
+                    }
+                }
+
                 // clique dentro da barra de menus?
                 if (my >= 0 && my < MENU_HEIGHT) {
                     int clickedMenu = -1;
@@ -334,8 +391,13 @@ int main(int argc, char* argv[]) {
                     }
                     if (clickedMenu >= 0) {
                         // toggle: se já aberto, fecha; senão abre
-                        if (menuSelecionado == clickedMenu) menuSelecionado = -1;
-                        else menuSelecionado = clickedMenu;
+                        if (menuSelecionado == clickedMenu) {
+                            menuSelecionado = -1;
+                            volumeDropdownOpen = 0;
+                        } else {
+                            menuSelecionado = clickedMenu;
+                            volumeDropdownOpen = 0;
+                        }
                     }
                 } else {
                     // clique fora da barra: verificar se clicou dentro do dropdown aberto
@@ -348,20 +410,67 @@ int main(int argc, char* argv[]) {
                         if (width < 160) width = 160;
                         SDL_Rect dropRect = {dx, dy, width, itemH * count};
 
-                        if (mx >= dropRect.x && mx <= dropRect.x + dropRect.w &&
+                        if (count > 0 && mx >= dropRect.x && mx <= dropRect.x + dropRect.w &&
                             my >= dropRect.y && my <= dropRect.y + dropRect.h) {
                             // clicou em uma opção do dropdown
                             int idx = (my - dropRect.y) / itemH;
                             if (idx >= 0 && idx < count) {
                                 const char* escolha = allDropdowns[menuSelecionado][idx];
-                                // abre modal com o título da opção clicada
-                                openModalWithTitle(&modal, escolha);
-                                // fecha dropdown
-                                menuSelecionado = -1;
+
+                                // comportamento especial por menu/opção
+                                if (menuSelecionado == 0) { // Cartucho
+                                    if (strcmp(escolha, "Sair") == 0) {
+                                        running = 0; // sair do app
+                                    } else if (strcmp(escolha, "Ejetar") == 0) {
+                                        // Ejetar: NÃO abre modal; apenas registra ação (substitua por ação real)
+                                        SDL_Log("Ação: Ejetar cartucho");
+                                    } else {
+                                        // abre modal para outras opções do Cartucho
+                                        openModalWithTitle(&modal, escolha);
+                                    }
+                                } else if (menuSelecionado == 1) { // Tela
+                                    if (strcmp(escolha, "Fullscreen") == 0) {
+                                        // Fullscreen: alterna modo fullscreen, NÃO abre modal
+                                        toggleFullscreen(window);
+                                    } else {
+                                        // outras opções abrem modal
+                                        openModalWithTitle(&modal, escolha);
+                                    }
+                                } else if (menuSelecionado == 2) { // Sistema
+                                    // Reiniciar / Salvar Estado / Carregar Estado: NÃO abrem modal, apenas log por enquanto
+                                    if (strcmp(escolha, "Reiniciar") == 0) {
+                                        SDL_Log("Ação: Reiniciar sistema (placeholder)");
+                                    } else if (strcmp(escolha, "Salvar Estado") == 0) {
+                                        SDL_Log("Ação: Salvar estado (placeholder)");
+                                    } else if (strcmp(escolha, "Carregar Estado") == 0) {
+                                        SDL_Log("Ação: Carregar estado (placeholder)");
+                                    }
+                                } else if (menuSelecionado == 3) { // Áudio
+                                    if (strcmp(escolha, "Volume") == 0) {
+                                        // abre sub-dropdown de volume (não abre modal)
+                                        volumeDropdownOpen = 1;
+                                    } else if (strcmp(escolha, "Mute") == 0) {
+                                        // não abre modal; alterna mute
+                                        muted = !muted;
+                                        SDL_Log("Mute toggled: %d", muted);
+                                    } else {
+                                        // Mixer ou outras abrem modal
+                                        openModalWithTitle(&modal, escolha);
+                                    }
+                                } else if (menuSelecionado == 4) { // Configuração
+                                    openModalWithTitle(&modal, escolha);
+                                } else if (menuSelecionado == 5) { // Ajuda
+                                    openModalWithTitle(&modal, escolha);
+                                }
+                                // fecha dropdown principal após clique (exceto quando volume sub-dropdown deve permanecer aberto)
+                                if (!(menuSelecionado == 3 && strcmp(escolha, "Volume") == 0)) {
+                                    menuSelecionado = -1;
+                                }
                             }
                         } else {
                             // clique fora do dropdown: fecha
                             menuSelecionado = -1;
+                            volumeDropdownOpen = 0;
                         }
                     }
                 }
@@ -407,10 +516,33 @@ int main(int argc, char* argv[]) {
             int width = menuBoxes[menuSelecionado].w;
             if (width < 160) width = 160;
             drawDropdown(renderer, font, allDropdowns[menuSelecionado], count, dx, dy, width);
+
+            // se volume sub-dropdown estiver aberto e o menu selecionado for Áudio (3), desenha-o
+            if (menuSelecionado == 3 && volumeDropdownOpen) {
+                int vdx = dx + width; // desenha à direita do dropdown de áudio
+                int vdy = dy;
+                int vwidth = 120;
+                drawDropdown(renderer, font, volumeItems, volumeCount, vdx, vdy, vwidth);
+            }
         }
 
         // desenha modal por cima de tudo (se aberto)
         drawModal(renderer, font, &modal);
+
+        // desenha indicador de volume/mute no canto superior direito (opcional, informativo)
+        {
+            char buf[64];
+            if (muted) snprintf(buf, sizeof(buf), "Muted");
+            else if (currentVolume >= 0) snprintf(buf, sizeof(buf), "Vol: %d%%", currentVolume);
+            else snprintf(buf, sizeof(buf), "Vol: --");
+            SDL_Color black = {0,0,0,255};
+            SDL_Surface* s = TTF_RenderUTF8_Solid(font, buf, black);
+            SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+            SDL_Rect dst = {WIDTH - s->w - 12, 6, s->w, s->h};
+            SDL_RenderCopy(renderer, t, NULL, &dst);
+            SDL_FreeSurface(s);
+            SDL_DestroyTexture(t);
+        }
 
         SDL_RenderPresent(renderer);
 
