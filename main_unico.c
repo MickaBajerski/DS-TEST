@@ -1,12 +1,14 @@
 // main_unico.c
-/* TODO: ajustar edge-case de dropdowns encostados nas bordas quando janela muito estreita.
-   Prioridade baixa; manter comportamento atual até revisão visual. */
+/* Tema escuro/claro com transição suave e idle animation integrada.
+   Versão completa pronta para compilar (dependências: SDL2, SDL2_ttf).
+*/
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #define DEFAULT_WIDTH 800
 #define DEFAULT_HEIGHT 600
@@ -33,7 +35,7 @@ const char* dropdownItems0[] = {"Inserir Cartucho", "Ejetar", "Info", "Sair"};
 const char* dropdownItems1[] = {"Resolução", "Fullscreen", "Escala"};
 const char* dropdownItems2[] = {"Reiniciar", "Salvar Estado", "Carregar Estado"};
 const char* dropdownItems3[] = {"Volume", "Mute", "Mixer"};
-const char* dropdownItems4[] = {"Vídeo", "Áudio", "Controles", "Sistema"};
+const char* dropdownItems4[] = {"Vídeo", "Áudio", "Controles", "Sistema", "Tema"};
 const char* dropdownItems5[] = {"Documentação", "Sobre"};
 
 const char** allDropdowns[] = {
@@ -54,6 +56,10 @@ const char* volumeItems[] = {
         "0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"
 };
 const int volumeCount = sizeof(volumeItems)/sizeof(volumeItems[0]);
+
+// THEME UI options
+const char* themeOptions[] = {"Escuro", "Claro"};
+const int themeOptionsCount = sizeof(themeOptions)/sizeof(themeOptions[0]);
 
 int volumeDropdownOpen = 0;
 int currentVolume = 100;
@@ -85,6 +91,72 @@ static int calc_draw_x(int desired_x, int width) {
     int right_limit = win_w - EDGE_MARGIN;
     if (desired_x + width > right_limit) desired_x = right_limit - width;
     return clamp_int(desired_x, EDGE_MARGIN, right_limit - width);
+}
+
+// THEME: estruturas e helpers para tema (dark <-> light) com interpolação suave
+typedef struct { float r,g,b,a; } FColor;
+
+typedef struct {
+    char name[64];
+    FColor background;
+    FColor panel;
+    FColor accent;
+    FColor text;
+    FColor mutedText;
+    FColor menuBg;
+    FColor menuHover;
+    // parâmetros para a animação idle
+    float idle_gain;      // multiplicador de "punch"
+    float idle_intensity; // escala base da animação
+} Theme;
+
+static Theme darkTheme;
+static Theme lightTheme;
+static Theme currentTheme;
+static Theme startTheme;
+static Theme targetTheme;
+static float theme_t = 1.0f; // 0..1 progress of transition
+static float theme_duration = 0.0f;
+
+static inline float lerp_f(float a, float b, float t) { return a + (b - a) * t; }
+static inline float smoothstep_f_local(float t) {
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static void theme_lerp(const Theme* a, const Theme* b, float t, Theme* out) {
+    float e = smoothstep_f_local(t);
+    out->idle_gain = lerp_f(a->idle_gain, b->idle_gain, e);
+    out->idle_intensity = lerp_f(a->idle_intensity, b->idle_intensity, e);
+#define LERP_COLOR(field) \
+    out->field.r = lerp_f(a->field.r, b->field.r, e); \
+    out->field.g = lerp_f(a->field.g, b->field.g, e); \
+    out->field.b = lerp_f(a->field.b, b->field.b, e); \
+    out->field.a = lerp_f(a->field.a, b->field.a, e);
+    LERP_COLOR(background)
+    LERP_COLOR(panel)
+    LERP_COLOR(accent)
+    LERP_COLOR(text)
+    LERP_COLOR(mutedText)
+    LERP_COLOR(menuBg)
+    LERP_COLOR(menuHover)
+#undef LERP_COLOR
+}
+
+static void startThemeTransition(const Theme* newTheme, float duration_seconds) {
+    startTheme = currentTheme;
+    targetTheme = *newTheme;
+    theme_duration = duration_seconds > 0.0f ? duration_seconds : 0.45f;
+    theme_t = 0.0f;
+}
+
+// helper para converter FColor (0..1) para Uint8
+static Uint8 fcol_to_u8(float v) {
+    int iv = (int)(v * 255.0f + 0.5f);
+    if (iv < 0) iv = 0;
+    if (iv > 255) iv = 255;
+    return (Uint8)iv;
 }
 
 // recria texture e buffer usando tamanho drawable (HiDPI aware)
@@ -183,10 +255,16 @@ void computeMenuBoxes(TTF_Font* font, int is_fullscreen) {
 
 void drawMenuBar(SDL_Renderer* renderer, TTF_Font* font) {
     SDL_Rect menuBar = {0, 0, win_w, MENU_HEIGHT};
-    SDL_SetRenderDrawColor(renderer, 100, 100, 100, 255);
+    // THEME: use currentTheme.menuBg for menu background
+    SDL_SetRenderDrawColor(renderer,
+                           fcol_to_u8(currentTheme.menuBg.r),
+                           fcol_to_u8(currentTheme.menuBg.g),
+                           fcol_to_u8(currentTheme.menuBg.b),
+                           fcol_to_u8(currentTheme.menuBg.a));
     SDL_RenderFillRect(renderer, &menuBar);
 
-    SDL_Color black = {0,0,0,255};
+    SDL_Color textColor = { fcol_to_u8(currentTheme.text.r), fcol_to_u8(currentTheme.text.g), fcol_to_u8(currentTheme.text.b), fcol_to_u8(currentTheme.text.a) };
+
     int mx, my;
     SDL_GetMouseState(&mx, &my);
 
@@ -197,12 +275,16 @@ void drawMenuBar(SDL_Renderer* renderer, TTF_Font* font) {
         int h = menuBoxes[i].h;
 
         if (mx >= x && mx <= x + w && my >= y && my <= y + h) {
-            SDL_SetRenderDrawColor(renderer, 130, 130, 130, 255);
+            SDL_SetRenderDrawColor(renderer,
+                                   fcol_to_u8(currentTheme.menuHover.r),
+                                   fcol_to_u8(currentTheme.menuHover.g),
+                                   fcol_to_u8(currentTheme.menuHover.b),
+                                   fcol_to_u8(currentTheme.menuHover.a));
             SDL_Rect r = {x, y, w, h};
             SDL_RenderFillRect(renderer, &r);
         }
 
-        SDL_Surface* surface = TTF_RenderUTF8_Solid(font, menus[i], black);
+        SDL_Surface* surface = TTF_RenderUTF8_Solid(font, menus[i], textColor);
         if (!surface) {
             SDL_Log("TTF_RenderUTF8_Solid failed: %s", TTF_GetError());
             continue;
@@ -224,8 +306,8 @@ void drawMenuBar(SDL_Renderer* renderer, TTF_Font* font) {
 // drawDropdown: adjusts x so dropdown never draws off-screen; clamps left/right.
 void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], int numItems, int x, int y, int width) {
     if (!items || numItems <= 0) return;
-    SDL_Color black = {0,0,0,255};
-    SDL_Color white = {255,255,255,255};
+    SDL_Color textColorNormal = { fcol_to_u8(currentTheme.text.r), fcol_to_u8(currentTheme.text.g), fcol_to_u8(currentTheme.text.b), fcol_to_u8(currentTheme.text.a) };
+    SDL_Color textColorHover = { fcol_to_u8(currentTheme.panel.r), fcol_to_u8(currentTheme.panel.g), fcol_to_u8(currentTheme.panel.b), fcol_to_u8(currentTheme.panel.a) };
     int itemHeight = DROPDOWN_ITEM_HEIGHT;
 
     // adjust x to keep dropdown inside window
@@ -237,11 +319,19 @@ void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], i
     for (int i = 0; i < numItems; ++i) {
         SDL_Rect rect = {x, y + i * itemHeight, width, itemHeight};
         int isHover = (mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h);
-        if (isHover) SDL_SetRenderDrawColor(renderer, 120,120,120,255);
-        else SDL_SetRenderDrawColor(renderer, 80,80,80,255);
+        if (isHover) SDL_SetRenderDrawColor(renderer,
+                                            fcol_to_u8(currentTheme.menuHover.r),
+                                            fcol_to_u8(currentTheme.menuHover.g),
+                                            fcol_to_u8(currentTheme.menuHover.b),
+                                            fcol_to_u8(currentTheme.menuHover.a));
+        else SDL_SetRenderDrawColor(renderer,
+                                    fcol_to_u8(currentTheme.panel.r),
+                                    fcol_to_u8(currentTheme.panel.g),
+                                    fcol_to_u8(currentTheme.panel.b),
+                                    fcol_to_u8(currentTheme.panel.a));
         SDL_RenderFillRect(renderer, &rect);
 
-        SDL_Color textColor = isHover ? white : black;
+        SDL_Color textColor = isHover ? textColorHover : textColorNormal;
         SDL_Surface* surface = TTF_RenderUTF8_Solid(font, items[i], textColor);
         if (!surface) {
             SDL_Log("TTF_RenderUTF8_Solid failed for dropdown item: %s", TTF_GetError());
@@ -260,6 +350,54 @@ void drawDropdown(SDL_Renderer* renderer, TTF_Font* font, const char* items[], i
     }
 }
 
+void drawThemeSelection(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
+    // botões: dois botões lado a lado dentro do modal
+    int padding = 12;
+    int btnW = (m->rect.w - padding*3) / 2;
+    int btnH = 36;
+    int bx = m->rect.x + padding;
+    int by = m->rect.y + 48;
+
+    // texto e cores
+    SDL_Color textColor = { fcol_to_u8(currentTheme.text.r), fcol_to_u8(currentTheme.text.g), fcol_to_u8(currentTheme.text.b), fcol_to_u8(currentTheme.text.a) };
+    SDL_Color btnTextColor = textColor;
+
+    for (int i = 0; i < themeOptionsCount; ++i) {
+        SDL_Rect btn = { bx + i * (btnW + padding), by, btnW, btnH };
+        // destaque do botão atualmente selecionado (com base no targetTheme.name)
+        int isSelected = 0;
+        if (strcmp(themeOptions[i], "Escuro") == 0 && strcmp(targetTheme.name, "Dark Default") == 0) isSelected = 1;
+        if (strcmp(themeOptions[i], "Claro") == 0 && strcmp(targetTheme.name, "Light Soft") == 0) isSelected = 1;
+
+        if (isSelected) {
+            SDL_SetRenderDrawColor(renderer,
+                                   fcol_to_u8(currentTheme.accent.r),
+                                   fcol_to_u8(currentTheme.accent.g),
+                                   fcol_to_u8(currentTheme.accent.b),
+                                   fcol_to_u8(currentTheme.accent.a));
+        } else {
+            SDL_SetRenderDrawColor(renderer,
+                                   fcol_to_u8(currentTheme.menuHover.r),
+                                   fcol_to_u8(currentTheme.menuHover.g),
+                                   fcol_to_u8(currentTheme.menuHover.b),
+                                   fcol_to_u8(currentTheme.menuHover.a));
+        }
+        SDL_RenderFillRect(renderer, &btn);
+
+        // texto do botão
+        SDL_Surface* s = TTF_RenderUTF8_Solid(font, themeOptions[i], btnTextColor);
+        if (s) {
+            SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+            if (t) {
+                SDL_Rect dst = { btn.x + (btn.w - s->w)/2, btn.y + (btn.h - s->h)/2, s->w, s->h };
+                SDL_RenderCopy(renderer, t, NULL, &dst);
+                SDL_DestroyTexture(t);
+            }
+            SDL_FreeSurface(s);
+        }
+    }
+}
+
 void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
     if (!m->open) return;
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
@@ -268,13 +406,21 @@ void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
     SDL_RenderFillRect(renderer, &overlay);
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 
-    SDL_SetRenderDrawColor(renderer, 120,120,120,255);
+    SDL_SetRenderDrawColor(renderer,
+                           fcol_to_u8(currentTheme.panel.r),
+                           fcol_to_u8(currentTheme.panel.g),
+                           fcol_to_u8(currentTheme.panel.b),
+                           fcol_to_u8(currentTheme.panel.a));
     SDL_RenderFillRect(renderer, &m->rect);
-    SDL_SetRenderDrawColor(renderer, 80,80,80,255);
+    SDL_SetRenderDrawColor(renderer,
+                           fcol_to_u8(currentTheme.menuHover.r),
+                           fcol_to_u8(currentTheme.menuHover.g),
+                           fcol_to_u8(currentTheme.menuHover.b),
+                           fcol_to_u8(currentTheme.menuHover.a));
     SDL_RenderDrawRect(renderer, &m->rect);
 
-    SDL_Color black = {0,0,0,255};
-    SDL_Surface* sTitle = TTF_RenderUTF8_Solid(font, m->title, black);
+    SDL_Color textColor = { fcol_to_u8(currentTheme.text.r), fcol_to_u8(currentTheme.text.g), fcol_to_u8(currentTheme.text.b), fcol_to_u8(currentTheme.text.a) };
+    SDL_Surface* sTitle = TTF_RenderUTF8_Solid(font, m->title, textColor);
     if (sTitle) {
         SDL_Texture* tTitle = SDL_CreateTextureFromSurface(renderer, sTitle);
         if (tTitle) {
@@ -290,18 +436,44 @@ void drawModal(SDL_Renderer* renderer, TTF_Font* font, Modal* m) {
         SDL_Log("TTF_RenderUTF8_Solid failed for modal title: %s", TTF_GetError());
     }
 
-    SDL_SetRenderDrawColor(renderer, 200,80,80,255);
+    // se for modal de tema, desenhar opções
+    if (strcmp(m->title, "Tema") == 0) {
+        drawThemeSelection(renderer, font, m);
+        // draw close button after content
+        SDL_SetRenderDrawColor(renderer,
+                               fcol_to_u8(currentTheme.accent.r),
+                               fcol_to_u8(currentTheme.accent.g),
+                               fcol_to_u8(currentTheme.accent.b),
+                               fcol_to_u8(currentTheme.accent.a));
+        SDL_RenderFillRect(renderer, &m->closeBtn);
+        SDL_SetRenderDrawColor(renderer, 255,255,255,255);
+        int cx = m->closeBtn.x + 4;
+        int cy = m->closeBtn.y + 4;
+        int cw = m->closeBtn.w - 8;
+        int ch = m->closeBtn.h - 8;
+        SDL_RenderDrawLine(renderer, cx, cy, cx + cw, cy + ch);
+        SDL_RenderDrawLine(renderer, cx + cw, cy, cx, cy + ch);
+        return; // não desenhar o placeholder padrão
+    }
+
+    SDL_SetRenderDrawColor(renderer,
+                           fcol_to_u8(currentTheme.accent.r),
+                           fcol_to_u8(currentTheme.accent.g),
+                           fcol_to_u8(currentTheme.accent.b),
+                           fcol_to_u8(currentTheme.accent.a));
     SDL_RenderFillRect(renderer, &m->closeBtn);
     SDL_SetRenderDrawColor(renderer, 255,255,255,255);
-    int cx = m->closeBtn.x + 4;
-    int cy = m->closeBtn.y + 4;
-    int cw = m->closeBtn.w - 8;
-    int ch = m->closeBtn.h - 8;
-    SDL_RenderDrawLine(renderer, cx, cy, cx + cw, cy + ch);
-    SDL_RenderDrawLine(renderer, cx + cw, cy, cx, cy + ch);
+    {
+        int cx = m->closeBtn.x + 4;
+        int cy = m->closeBtn.y + 4;
+        int cw = m->closeBtn.w - 8;
+        int ch = m->closeBtn.h - 8;
+        SDL_RenderDrawLine(renderer, cx, cy, cx + cw, cy + ch);
+        SDL_RenderDrawLine(renderer, cx + cw, cy, cx, cy + ch);
+    }
 
     const char* placeholder = "Conteúdo da janela (substituir depois)";
-    SDL_Surface* sCont = TTF_RenderUTF8_Solid(font, placeholder, black);
+    SDL_Surface* sCont = TTF_RenderUTF8_Solid(font, placeholder, textColor);
     if (sCont) {
         SDL_Texture* tCont = SDL_CreateTextureFromSurface(renderer, sCont);
         if (tCont) {
@@ -348,8 +520,8 @@ void drawVolumeIndicator(SDL_Renderer* renderer, TTF_Font* font) {
     char buf[64];
     if (muted) snprintf(buf, sizeof(buf), "Muted");
     else snprintf(buf, sizeof(buf), "Vol: %d%%", currentVolume);
-    SDL_Color black = {0,0,0,255};
-    SDL_Surface* s = TTF_RenderUTF8_Solid(font, buf, black);
+    SDL_Color textColor = { fcol_to_u8(currentTheme.text.r), fcol_to_u8(currentTheme.text.g), fcol_to_u8(currentTheme.text.b), fcol_to_u8(currentTheme.text.a) };
+    SDL_Surface* s = TTF_RenderUTF8_Solid(font, buf, textColor);
     if (!s) {
         SDL_Log("TTF_RenderUTF8_Solid failed for volume indicator: %s", TTF_GetError());
         return;
@@ -383,7 +555,7 @@ typedef struct {
 static ColorAnim colorAnims[NUM_COLOR_ANIMS];
 
 // linear interpolation
-static inline float lerp_f(float a, float b, float t) { return a + (b - a) * t; }
+static inline float lerp_f_local(float a, float b, float t) { return a + (b - a) * t; }
 
 // smoothstep easing (ease in/out)
 static inline float smoothstep_f(float t) {
@@ -440,9 +612,9 @@ static void get_anim_color(const ColorAnim* ca, float out[3]) {
     if (tt < 0.0f) tt = 0.0f;
     if (tt > 1.0f) tt = 1.0f;
     float e = smoothstep_f(tt);
-    out[0] = lerp_f(ca->sr, ca->tr, e);
-    out[1] = lerp_f(ca->sg, ca->tg, e);
-    out[2] = lerp_f(ca->sb, ca->tb, e);
+    out[0] = lerp_f_local(ca->sr, ca->tr, e);
+    out[1] = lerp_f_local(ca->sg, ca->tg, e);
+    out[2] = lerp_f_local(ca->sb, ca->tb, e);
 }
 
 // -------------------- end color animation --------------------
@@ -469,6 +641,41 @@ int main(int argc, char* argv[]) {
     TTF_Font* font = TTF_OpenFont("fonts/arial.ttf", 18);
     if (!font) { SDL_Log("Erro ao carregar fonte: %s", TTF_GetError()); free(pixels); SDL_DestroyTexture(texture); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; }
 
+    // THEME: inicializar temas (darkTheme = tema atual; lightTheme = tema claro suave)
+    // Valores sugeridos (0..1 floats)
+    darkTheme = (Theme){
+            .name = "Dark Default",
+            .background = {0.06f,0.07f,0.08f,1.0f}, // #0f1113
+            .panel = {0.11f,0.11f,0.13f,1.0f},      // #1b1d20
+            .accent = {0.43f,0.70f,1.0f,1.0f},      // #6fb3ff
+            .text = {0.90f,0.93f,0.96f,1.0f},       // #e6eef6
+            .mutedText = {0.60f,0.66f,0.70f,1.0f},  // #9aa6b2
+            .menuBg = {0.08f,0.09f,0.10f,1.0f},
+            .menuHover = {0.16f,0.17f,0.18f,1.0f},
+            .idle_gain = 1.6f,
+            .idle_intensity = 0.7f
+    };
+
+    lightTheme = (Theme){
+            .name = "Light Soft",
+            .background = {0.96f,0.97f,0.97f,1.0f}, // #f5f7f8
+            .panel = {1.0f,1.0f,1.0f,1.0f},         // #ffffff
+            .accent = {0.23f,0.51f,0.77f,1.0f},     // #3b82c4
+            .text = {0.06f,0.09f,0.13f,1.0f},       // #0f1720
+            .mutedText = {0.36f,0.42f,0.45f,1.0f},  // #5b6b73
+            .menuBg = {1.0f,1.0f,1.0f,1.0f},
+            .menuHover = {0.90f,0.94f,0.96f,1.0f},
+            .idle_gain = 3.0f,
+            .idle_intensity = 1.0f
+    };
+
+    // start with dark theme
+    currentTheme = darkTheme;
+    targetTheme = darkTheme;
+    startTheme = darkTheme;
+    theme_t = 1.0f;
+    theme_duration = 0.0f;
+
     int running = 1;
     SDL_Event event;
     int frame = 0;
@@ -483,12 +690,35 @@ int main(int argc, char* argv[]) {
     Uint32 last_time = SDL_GetTicks();
     init_color_anims(3.0f); // base duration in seconds (tweak as needed)
 
+    // We'll compute an anim tint each frame from colorAnims[0] to subtly tint accent
+    float animTint[3] = {0.0f, 0.0f, 0.0f};
+
     while (running) {
         Uint32 flags = SDL_GetWindowFlags(window);
         int is_fullscreen = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 1 : 0;
 
         // compute menu boxes using fullscreen flag
         computeMenuBoxes(font, is_fullscreen);
+
+        // timing
+        Uint32 now = SDL_GetTicks();
+        float delta = (now - last_time) / 1000.0f;
+        if (delta > 0.1f) delta = 0.1f;
+        last_time = now;
+
+        // THEME: advance theme transition
+        if (theme_t < 1.0f) {
+            theme_t += delta / (theme_duration > 0.0f ? theme_duration : 0.45f);
+            if (theme_t > 1.0f) theme_t = 1.0f;
+            theme_lerp(&startTheme, &targetTheme, theme_t, &currentTheme);
+        }
+
+        // update color animations (use currentTheme.idle_intensity to scale base speed)
+        float speedMultiplier = 1.0f;
+        update_color_anims(delta, speedMultiplier);
+
+        // compute animTint from first ColorAnim to tint accent subtly
+        get_anim_color(&colorAnims[0], animTint);
 
         // process events; mark need_recreate when size changes
         while (SDL_PollEvent(&event)) {
@@ -503,6 +733,11 @@ int main(int argc, char* argv[]) {
                 }
             } else if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_ESCAPE) { if (modal.open) modal.open = 0; else running = 0; }
+                // quick theme toggle for testing: T toggles theme
+                if (event.key.keysym.sym == SDLK_t) {
+                    if (strcmp(currentTheme.name, "Dark Default") == 0) startThemeTransition(&lightTheme, 0.45f);
+                    else startThemeTransition(&darkTheme, 0.45f);
+                }
             }
                 // --- hover handling para abrir/fechar volumeDropdownOpen ---
             else if (event.type == SDL_MOUSEMOTION) {
@@ -555,13 +790,45 @@ int main(int argc, char* argv[]) {
             else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
                 int mx = event.button.x, my = event.button.y;
 
+                // modal handling (custom for theme modal)
                 if (modal.open) {
-                    if (isPointInRect(mx, my, &modal.closeBtn)) modal.open = 0;
-                    else if (!isPointInRect(mx, my, &modal.rect)) modal.open = 0;
-                    continue;
+                    // clique no botão fechar
+                    if (isPointInRect(mx, my, &modal.closeBtn)) { modal.open = 0; continue; }
+
+                    // se clicou dentro do modal
+                    if (isPointInRect(mx, my, &modal.rect)) {
+                        // se for modal de tema, detectar clique nos botões
+                        if (strcmp(modal.title, "Tema") == 0) {
+                            int padding = 12;
+                            int btnW = (modal.rect.w - padding*3) / 2;
+                            int btnH = 36;
+                            int bx = modal.rect.x + padding;
+                            int by = modal.rect.y + 48;
+                            for (int i = 0; i < themeOptionsCount; ++i) {
+                                SDL_Rect btn = { bx + i * (btnW + padding), by, btnW, btnH };
+                                if (mx >= btn.x && mx <= btn.x + btn.w && my >= btn.y && my <= btn.y + btn.h) {
+                                    // aplicar tema correspondente
+                                    if (strcmp(themeOptions[i], "Escuro") == 0) {
+                                        startThemeTransition(&darkTheme, 0.45f);
+                                    } else {
+                                        startThemeTransition(&lightTheme, 0.45f);
+                                    }
+                                    modal.open = 0;
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+
+                        // clique dentro do modal, mas não no conteúdo específico: ignorar (mantém aberto)
+                        continue;
+                    } else {
+                        // clique fora do modal fecha
+                        modal.open = 0;
+                        continue;
+                    }
                 }
 
-                // se a subcaixa de volume estiver aberta, tratar clique nela primeiro
                 // se a subcaixa de volume estiver aberta, tratar clique nela primeiro
                 if (volumeDropdownOpen) {
                     int dx = menuBoxes[3].x;
@@ -618,7 +885,6 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-
                 // clique na barra de menu (abre/fecha menus)
                 if (my >= 0 && my < MENU_HEIGHT) {
                     int clickedMenu = -1;
@@ -669,8 +935,13 @@ int main(int argc, char* argv[]) {
                                 // outros itens do menu Áudio (exceto "Volume") continuam funcionando
                                 if (strcmp(escolha, "Mute") == 0) { muted = !muted; SDL_Log("Mute toggled: %d", muted); }
                                 else if (strcmp(escolha, "Mixer") == 0) openModalWithTitle(&modal, escolha);
-                            } else if (menuSelecionado == 4) openModalWithTitle(&modal, escolha);
-                            else if (menuSelecionado == 5) openModalWithTitle(&modal, escolha);
+                            } else if (menuSelecionado == 4) {
+                                if (strcmp(escolha, "Tema") == 0) {
+                                    openModalWithTitle(&modal, "Tema");
+                                } else {
+                                    openModalWithTitle(&modal, escolha);
+                                }
+                            } else if (menuSelecionado == 5) openModalWithTitle(&modal, escolha);
 
                             // fechar menu, exceto quando clicamos (ou ignoramos) em "Volume"
                             if (!(menuSelecionado == 3 && escolha && strcmp(escolha, "Volume") == 0)) menuSelecionado = -1;
@@ -697,7 +968,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // perform recreate once per loop if needed
         if (need_recreate) {
             if (!recreateTextureAndBufferFromWindow(window, renderer)) {
                 SDL_Log("Falha ao recriar texture/buffer");
@@ -705,94 +975,132 @@ int main(int argc, char* argv[]) {
             need_recreate = 0;
         }
 
-        // --- timing and color animation update (peak-synced) ---
-        Uint32 now = SDL_GetTicks();
-        float delta = (now - last_time) / 1000.0f;
-        if (delta > 0.1f) delta = 0.1f;
-        last_time = now;
+        // ---------- RENDER (idle texture + UI) ----------
+        // 1) preencher pixels com a idle animation (usando colorAnims e currentTheme)
+        if (pixels && texture) {
+            // parâmetros locais
+            const float intensity = currentTheme.idle_intensity; // escala base
+            const float gain = currentTheme.idle_gain;           // punch
 
-        // detect peak rhythm: sincroniza com o "pico" do efeito (mesma cadência do colorPhase)
-        int isPeakFrame = (frame % 60) == 0;
-        // speed multiplier: acelera durante pico para que a cor acompanhe o pulso
-        float speedMultiplier = isPeakFrame ? 4.0f : 1.0f;
+            // --- remap anims por tema (dinâmico) ---
+            float animR[3], animG[3], animB[3];
 
-        update_color_anims(delta, speedMultiplier);
-
-        // get interpolated colors for each anim
-        float animCols[NUM_COLOR_ANIMS][3];
-        for (int i = 0; i < NUM_COLOR_ANIMS; ++i) {
-            get_anim_color(&colorAnims[i], animCols[i]);
-        }
-
-        // gerar sweep RGB (preenche drawable buffer) usando cores suaves e punch sincronizado
-        for (int y = 0; y < drawable_h; y++) {
-            for (int x = 0; x < drawable_w; x++) {
-                int raw = (x + y - frame) % 128; if (raw < 0) raw += 128;
-                int tri = abs(raw - 64);
-                // intensidade base 0..1
-                float intensity = (float)tri / 64.0f;
-                if (intensity > 1.0f) intensity = 1.0f;
-
-                // combine anim colors with intensity; map each anim to a channel
-                float rf = animCols[0][0] * intensity;
-                float gf = animCols[1][1] * intensity;
-                float bf = animCols[2][2] * intensity;
-
-                // "punch" adicional nos pontos de tri%64==0, preservando suavidade
-                if (tri % 64 == 0) {
-                    int colorPhase = (frame / 60) % 3;
-                    float punch = intensity * 3.0f; // ajuste do ganho do pico
-                    if (colorPhase == 0) gf += punch;
-                    else if (colorPhase == 1) bf += punch;
-                    else if (colorPhase == 2) rf += punch;
-                }
-
-                int r = clamp_int((int)(rf * 255.0f), 0, 255);
-                int g = clamp_int((int)(gf * 255.0f), 0, 255);
-                int b = clamp_int((int)(bf * 255.0f), 0, 255);
-
-                pixels[y * drawable_w + x] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+            if (strcmp(currentTheme.name, "Dark Default") == 0) {
+                // comportamento para Dark (mapeamento original)
+                get_anim_color(&colorAnims[2], animR); // anim 2 -> R
+                get_anim_color(&colorAnims[1], animG); // anim 1 -> G
+                get_anim_color(&colorAnims[0], animB); // anim 0 -> B
+            } else {
+                // comportamento para Light (inverte R <-> B)
+                get_anim_color(&colorAnims[0], animR); // anim 0 -> R
+                get_anim_color(&colorAnims[1], animG); // anim 1 -> G
+                get_anim_color(&colorAnims[2], animB); // anim 2 -> B
             }
+            // --- fim remap ---
+
+            // precompute accent tint (0..1)
+            float ar = currentTheme.accent.r;
+            float ag = currentTheme.accent.g;
+            float ab = currentTheme.accent.b;
+
+            // preencher pixels (procedural sweep)
+            for (int y = 0; y < drawable_h; ++y) {
+                float fy = (float)y / (float)(drawable_h > 1 ? drawable_h - 1 : 1);
+                for (int x = 0; x < drawable_w; ++x) {
+                    float fx = (float)x / (float)(drawable_w > 1 ? drawable_w - 1 : 1);
+
+                    // combine anim channels with position to create smooth sweep
+                    float v0 = 0.5f + 0.5f * sinf((fx + animR[0]*0.5f + fy*0.3f) * 6.2831853f + animR[1]*2.0f);
+                    float v1 = 0.5f + 0.5f * sinf((fx*1.2f + animG[1]*0.6f + fy*0.2f) * 6.2831853f + animG[2]*1.5f);
+                    float v2 = 0.5f + 0.5f * sinf((fx*0.8f + animB[2]*0.4f + fy*0.1f) * 6.2831853f + animB[0]*2.2f);
+
+                    // base color from anims (note mapping: animR/animG/animB)
+                    float rr = (v0 * animR[0] + v1 * animG[0] + v2 * animB[0]) / 3.0f;
+                    float gg = (v0 * animR[1] + v1 * animG[1] + v2 * animB[1]) / 3.0f;
+                    float bb = (v0 * animR[2] + v1 * animG[2] + v2 * animB[2]) / 3.0f;
+
+                    // apply accent tint (subtle) and theme intensity/gain
+                    rr = lerp_f(rr, ar, 0.18f) * intensity;
+                    gg = lerp_f(gg, ag, 0.18f) * intensity;
+                    bb = lerp_f(bb, ab, 0.18f) * intensity;
+
+                    // optional punch: add small bright pulses based on x,y and gain
+                    float pulse = (0.5f + 0.5f * sinf((fx + fy) * 12.0f + animR[0]*6.0f)) * 0.06f * gain;
+                    rr = rr + pulse;
+                    gg = gg + pulse;
+                    bb = bb + pulse;
+
+                    Uint8 R = fcol_to_u8(rr);
+                    Uint8 G = fcol_to_u8(gg);
+                    Uint8 B = fcol_to_u8(bb);
+                    Uint8 A = 255;
+
+                    // ARGB8888 in memory
+                    pixels[y * drawable_w + x] = (A << 24) | (R << 16) | (G << 8) | (B);
+                }
+            }
+
+            // 2) atualizar texture com pixels e desenhar como fundo
+            SDL_UpdateTexture(texture, NULL, pixels, drawable_w * sizeof(Uint32));
+            SDL_Rect dst = {0, 0, win_w, win_h};
+            SDL_RenderCopy(renderer, texture, NULL, &dst);
+        } else {
+            // fallback: limpar com background theme se texture/pixels não existirem
+            SDL_SetRenderDrawColor(renderer,
+                                   fcol_to_u8(currentTheme.background.r),
+                                   fcol_to_u8(currentTheme.background.g),
+                                   fcol_to_u8(currentTheme.background.b),
+                                   fcol_to_u8(currentTheme.background.a));
+            SDL_RenderClear(renderer);
         }
 
-        // atualizar texture com drawable buffer
-        SDL_UpdateTexture(texture, NULL, pixels, drawable_w * sizeof(Uint32));
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, texture, NULL, NULL);
-
+        // agora desenhar UI por cima
         drawMenuBar(renderer, font);
 
-        if (menuSelecionado >= 0 && menuSelecionado < numMenus) {
+        // draw dropdown if open
+        if (menuSelecionado != -1) {
             int dx = menuBoxes[menuSelecionado].x;
             int dy = MENU_HEIGHT;
-            int count = dropdownCounts[menuSelecionado];
             int width = menuBoxes[menuSelecionado].w; if (width < DROPDOWN_MIN_WIDTH) width = DROPDOWN_MIN_WIDTH;
-
             int draw_dx = calc_draw_x(dx, width);
-            drawDropdown(renderer, font, allDropdowns[menuSelecionado], count, draw_dx, dy, width);
+            drawDropdown(renderer, font, allDropdowns[menuSelecionado], dropdownCounts[menuSelecionado], draw_dx, dy, width);
 
+            // if audio menu and volumeDropdownOpen, draw subbox
             if (menuSelecionado == 3 && volumeDropdownOpen) {
                 int vdx = draw_dx + width;
                 int vdy = dy;
                 int vwidth = VOLUME_SUB_WIDTH;
                 if (vdx + vwidth > win_w - EDGE_MARGIN) vdx = draw_dx - vwidth;
                 if (vdx < EDGE_MARGIN) vdx = EDGE_MARGIN;
+                // draw subbox background using panel color
+                SDL_SetRenderDrawColor(renderer,
+                                       fcol_to_u8(currentTheme.panel.r),
+                                       fcol_to_u8(currentTheme.panel.g),
+                                       fcol_to_u8(currentTheme.panel.b),
+                                       fcol_to_u8(currentTheme.panel.a));
+                SDL_Rect vRect = {vdx, vdy, vwidth, DROPDOWN_ITEM_HEIGHT * volumeCount};
+                SDL_RenderFillRect(renderer, &vRect);
+                // draw items
                 drawDropdown(renderer, font, volumeItems, volumeCount, vdx, vdy, vwidth);
             }
         }
 
+        // draw modal if open
         drawModal(renderer, font, &modal);
 
+        // draw volume indicator
         drawVolumeIndicator(renderer, font);
 
         SDL_RenderPresent(renderer);
+
+        // small delay to cap CPU (tweak as needed)
+        SDL_Delay(8);
         frame++;
-        SDL_Delay(16);
     }
 
-    TTF_CloseFont(font);
-    free(pixels);
-    SDL_DestroyTexture(texture);
+    // cleanup
+    if (pixels) free(pixels);
+    if (texture) SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     TTF_Quit();
