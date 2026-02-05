@@ -1,0 +1,7 @@
+# ignora executáveis e DLLs
+*.exe
+*.dll
+
+# ignora pacotes de distribuição
+dist/
+*.zip
